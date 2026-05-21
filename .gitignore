@@ -1,0 +1,43 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Dependencies (regenerable via npm install)
+node_modules/
+app/node_modules/
+frontend/node_modules/
+
+# Build artifacts (regenerable via npm run build)
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# Runtime data (lives on the server, not in source)
+data/
+uploads/
+
+# Backups and archives
+*.tar.gz
+*.zip
+intranet-backup*
+
+# Local development cruft
+cookies.txt
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.Trash-*
+
+# Claude / agent state
+.claude/

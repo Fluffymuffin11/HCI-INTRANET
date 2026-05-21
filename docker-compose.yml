@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  web:
+    image: nginx:1.30-alpine
+    container_name: intranet_nginx
+    ports:
+      - "8080:80"
+    volumes:
+      - ./frontend/dist:/usr/share/nginx/html:ro
+      - ./public/admin:/admin:ro
+      - ./public/manager:/manager:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    image: node:20-alpine
+    container_name: intranet_backend
+    working_dir: /app
+    environment:
+      - TZ=America/Chicago
+      - NODE_ENV=production
+      - SESSION_SECRET=${SESSION_SECRET}
+    volumes:
+      - ./app:/app
+      - ./data:/data
+      - ./uploads:/uploads
+    command: sh -c "npm install && npm start"
+    restart: unless-stopped
