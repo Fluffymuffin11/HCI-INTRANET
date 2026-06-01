@@ -1,10 +1,11 @@
 # 05 — Remote Access
 
-This document covers **all the ways into the production server** from the
-hospital's internal corporate network — SSH, the Cockpit web console, and
-the direct database access used by DBAs.
+This document covers **all the ways into the server today** in the homelab
+environment — SSH, the desktop via RDP, the Cockpit web console, and the
+Tailscale overlay that secures remote access. Production access (Huntsville
+Hospital) drops Tailscale and RDP; see the migration callout at the end.
 
-## Access matrix
+## Access matrix (current homelab)
 
 ```
                 +----------------------------------------------------------+
@@ -12,57 +13,145 @@ the direct database access used by DBAs.
                 |                                                          |
                 |   Port   Method            Purpose                       |
                 |   ----   ----------------  ----------------------------- |
-   ops jump --> |   22     SSH (OpenSSH)     Shell, file transfer, scripts |
-                |  443     HTTPS (nginx)     The intranet itself           |
+   any device   |   22     SSH (OpenSSH)     Shell, file transfer, scripts |
+   ----->------>|  8080    HTTP (nginx)      The intranet itself           |
+                |  3389    RDP (g-r-d)       Full GNOME desktop, headless  |
                 |  9090    HTTPS (Cockpit)   Web-based admin console       |
                 |                                                          |
+                |   *g-r-d = gnome-remote-desktop                          |
                 +----------------------------------------------------------+
 
-   The PostgreSQL database runs on the SAME VM (native, not in a container):
-   Intranet-HCI.heart.local : 5432  (see "Direct database access" below)
+   All four ports are reachable on BOTH the LAN address AND the Tailscale
+   address. SQLite-style DB inspection is via `docker compose exec backend`.
 ```
 
-There is **no Tailscale, no VPN client, no internet-facing port** for this
-system. All access is over the hospital's internal corporate network only.
+## Tailscale (the secure overlay, homelab only)
+
+Tailscale is a peer-to-peer encrypted mesh VPN that gives each authorized
+device a `100.x.y.z` address. Used here so the homelab VM can be reached
+from the admin's Mac without exposing any ports publicly.
+
+```
+   Internet
+       |
+       v
+   +---------------------------------------------------------+
+   |  Tailscale coordination server  (login.tailscale.com)   |
+   |  authenticates devices, never sees traffic              |
+   +---------------------------------------------------------+
+                          |  authentication only
+                          v
+   +---------------------------------------------------------+
+   |  Tailnet                                                |
+   |                                                         |
+   |  +--------------+    encrypted     +-------------+      |
+   |  | Admin Mac    | <--------------> | RHEL VM     |      |
+   |  +--------------+                  +-------------+      |
+   |                                                         |
+   |  +----------------+                                     |
+   |  | Proxmox host   |                                     |
+   |  +----------------+                                     |
+   +---------------------------------------------------------+
+```
+
+### Why we use it (homelab)
+
+- No port-forwarding required on the homelab router
+- End-to-end encrypted (WireGuard)
+- Identity-based access — devices are authorized in the Tailscale admin console
+- DNS works — devices can be reached by hostname (MagicDNS)
+
+### On the server: check Tailscale status
+
+```bash
+$ tailscale status              # list peers + self IP
+$ tailscale ip                  # just our IPs
+$ sudo systemctl status tailscaled
+```
+
+If Tailscale fails to come up:
+```bash
+$ sudo systemctl restart tailscaled
+$ sudo tailscale up                # may prompt for login URL
+```
 
 ## SSH access
 
-From the IT-Ops jump host:
+```bash
+$ ssh <user>@<tailscale-ip>        # via Tailscale (anywhere)
+$ ssh <user>@<lan-ip>              # via LAN (in the homelab)
+```
+
+Password: the local Linux password.
+
+### Recommended: switch to key-based SSH
 
 ```bash
-$ ssh <ops-user>@Intranet-HCI.heart.local
+$ ssh-keygen -t ed25519                                       # on your Mac
+$ ssh-copy-id <user>@<tailscale-ip>                           # installs your pubkey
+$ ssh <user>@<tailscale-ip>                                   # no password needed
 ```
 
-Authentication is **key-based only** in production; password SSH is disabled
-in `/etc/ssh/sshd_config`:
+## RDP — full GNOME desktop
+
+The server runs **gnome-remote-desktop in headless (system) mode**. Every
+RDP connection spawns a fresh GNOME session.
+
+### Connection details
+
+| Setting | Value |
+|---|---|
+| Host | `<tailscale-ip>` or `<lan-ip>` |
+| Port | `3389` |
+| Username | local Linux user |
+| Password | local Linux password |
+| Security | Ignore self-signed certificate warnings |
+
+### Recommended client: Royal TSX (free, native macOS)
+
+Compatibility findings during homelab setup:
+
+| Client | Works? | Notes |
+|---|---|---|
+| **Royal TSX** (royalapps.com) | ✅ | Native, free, handles RDP server redirection |
+| Microsoft "Windows App" (App Store) | ⚠️ | Cannot handle redirection used in headless mode |
+| Jump Desktop | ❌ | NLA / NTLM incompatibility with gnome-remote-desktop |
+| xfreerdp via Homebrew | ⚠️ | Renders through XQuartz — looks rough |
+| virt-viewer + SPICE | ❌ | Bypassed in favor of RDP |
+
+To toggle full-screen in Royal TSX: **⌥⌘F** (Connection Full Screen).
+
+### What "headless mode" means
 
 ```
-PasswordAuthentication no
-PermitRootLogin no
+   Royal TSX connects to :3389
+       |
+       v
+   gnome-remote-desktop daemon authenticates (TLS + credentials)
+       |
+       v
+   Daemon spawns a fresh GDM session for the configured user
+       |
+       v
+   Mutter creates a virtual monitor at the resolution Royal TSX requested
+       |
+       v
+   You see the desktop. Settings persist (same ~/.config), display layout doesn't.
 ```
 
-To add a new operator's key:
-
-```bash
-$ ssh <ops-user>@Intranet-HCI.heart.local
-$ sudo mkdir -p /home/<new-user>/.ssh
-$ sudo nano /home/<new-user>/.ssh/authorized_keys
-   # paste the public key
-$ sudo chmod 600 /home/<new-user>/.ssh/authorized_keys
-$ sudo chown -R <new-user>:<new-user> /home/<new-user>/.ssh
-```
+When you disconnect, the GNOME session is torn down. Next connect = new session.
 
 ## Cockpit (web console)
 
-The most beginner-friendly way to manage the server:
+The friendliest way to manage the server:
 
 ```
-   https://Intranet-HCI.heart.local:9090/
+   https://<tailscale-ip>:9090/      <- via Tailscale
+   https://<lan-ip>:9090/            <- via LAN
 ```
 
-Cockpit uses the same TLS certificate as the main site, so browsers show the
-normal padlock. Log in with the operator's hospital domain account (must be
-a member of `wheel` group on the VM).
+Self-signed certificate — accept the warning. Log in with the local Linux
+user.
 
 From Cockpit:
 
@@ -72,14 +161,13 @@ From Cockpit:
    |                                                               |
    |  Overview          live CPU / memory / disk / network graphs  |
    |  Logs              browse journald with search and filters    |
-   |  Storage           disk partitions, free space, NFS mounts    |
+   |  Storage           disk partitions, free space                |
    |  Networking        interfaces, firewall, VPN                  |
    |  Podman / Docker   running containers, restart, view logs     |
    |  Software updates  list and install dnf updates with a UI     |
    |  Services          systemd unit list, start/stop/enable       |
    |  Accounts          list/create users, change passwords        |
    |  Terminal          full shell access in the browser           |
-   |  SELinux           policy state                               |
    +---------------------------------------------------------------+
 ```
 
@@ -87,52 +175,73 @@ For an operator who is not a Linux expert, **Cockpit is the single best
 tool to learn.** Most maintenance tasks in [`06-maintenance.md`](06-maintenance.md)
 can be performed through Cockpit.
 
-## Direct database access
+## Local console (Proxmox)
 
-A key production capability: PostgreSQL runs as a **native systemd service**
-on the same VM as the application (not in a Docker container). This lets DBAs
-connect directly from their workstations to the same hostname as the website,
-on the standard PostgreSQL port. There is no need to shell into any container.
+If all remote paths fail, get into the VM via the Proxmox web UI:
 
-### Database connection details
+1. Browse to the Proxmox host
+2. Log in to Proxmox
+3. Select VM **101** in the left tree
+4. Click **Console** in the top right (use noVNC; SPICE is broken)
 
-| Item | Value |
+## Quick reference: which tool when
+
+| You want to... | Use |
 |---|---|
-| Hostname | `Intranet-HCI.heart.local` |
-| Port | `5432` (default PostgreSQL) |
-| Database name | `intranet_hci` |
-| Application user | `intranet_app` (used by the Fastify backend) |
-| Read-only user | `intranet_ro` (for reporting / dashboards) |
-| DBA users | one per DBA, with full privileges, key-based auth where supported |
+| Run a one-line command | SSH |
+| Edit a file in vim/nano | SSH |
+| Restart a container | SSH or Cockpit |
+| Watch system metrics | Cockpit |
+| Read logs with a search box | Cockpit |
+| Use a graphical app (Firefox, Files) | RDP |
+| Tweak GNOME settings | RDP |
+| Update Red Hat packages | Cockpit or `sudo dnf upgrade` |
+| Recover from boot problems | Proxmox noVNC console |
+| Inspect the database | `docker compose exec backend` + `sqlite3` |
 
-### Connection from a DBA workstation
+---
 
-Using `psql`:
-```bash
-$ psql -h Intranet-HCI.heart.local -U <dba-user> -d intranet_hci
-```
+## 🔄 Production migration
 
-Using DBeaver, pgAdmin, or another GUI client:
+Remote access changes substantially when moving to Huntsville Hospital:
+
+| Item | Homelab (today) | Production target |
+|---|---|---|
+| Network reach | Tailscale + LAN | Hospital corporate network only |
+| Tailscale | Active, all four ports reachable through it | Not installed |
+| RDP via gnome-remote-desktop | On port 3389 | Removed entirely; Cockpit-only |
+| Web port | HTTP :8080 | HTTPS :443 |
+| Cockpit | Self-signed cert, open from any LAN device | Hospital-issued cert, source-restricted to IT-Ops jump host |
+| SSH | Password OR key | Key-only, source-restricted to IT-Ops jump host |
+| Local console | Proxmox noVNC | vSphere Client (vCenter) → Open Console |
+| New: DBA access | (n/a — SQLite inside container) | `psql` / DBeaver / pgAdmin direct to `Intranet-HCI.heart.local:5432` |
+
+### What DBAs gain in production
+
+Once PostgreSQL is in place, DBAs connect directly from their workstations
+without any container access. This is a major upgrade over today's
+`docker compose exec backend sqlite3` workflow, which requires shell access
+to the application VM.
+
+### DBA connection details (target)
 
 | Field | Value |
 |---|---|
 | Host | `Intranet-HCI.heart.local` |
 | Port | `5432` |
 | Database | `intranet_hci` |
-| Username | the DBA's account |
-| Authentication | as configured (LDAP / password / certificate) |
-| SSL mode | `require` (production policy) |
+| Authentication | as configured (LDAP / password / certificate, per hospital policy) |
+| SSL mode | `require` |
 
-### What DBAs can do
+### What DBAs can do (target)
 
 - Run ad-hoc `SELECT` queries against any table
-- Build reports against the read-only replica
+- Build reports against the read-only `intranet_ro` user
 - Take logical backups with `pg_dump`
 - Inspect query plans with `EXPLAIN ANALYZE`
 - Tune indexes and statistics
-- Restore from a backup (with change-management approval)
 
-### What DBAs should NOT do (without coordination)
+### What DBAs should NOT do (target, without coordination)
 
 - Run `ALTER TABLE` or other schema changes — the application uses **Prisma
   migrations**; manual changes will drift from the codebase
@@ -156,31 +265,6 @@ Schema changes flow through the codebase:
        v
    Production deploy applies via `prisma migrate deploy`
 ```
-
-## Quick reference: which tool when
-
-| You want to... | Use |
-|---|---|
-| Run a one-line command | SSH |
-| Edit a file in vim / nano | SSH |
-| Restart a container | SSH or Cockpit |
-| Watch system metrics | Cockpit |
-| Read logs with a search box | Cockpit |
-| Update Red Hat packages | Cockpit (easy) or SSH `sudo dnf upgrade` |
-| Query the database | psql / DBeaver / pgAdmin to `Intranet-HCI.heart.local:5432` |
-| Recover from boot problems | vSphere Client (vCenter) -> VM -> Web Console |
-
-## Local console (vSphere)
-
-If all remote paths fail, you can still get into the VM via the vSphere Client:
-
-1. Open vCenter at `<vcenter-fqdn>`
-2. Log in with your vSphere credentials
-3. Locate the VM `Intranet-HCI` in the inventory tree
-4. Right-click -> Open Console (or use the embedded HTML5 console)
-
-The console gives you a virtual keyboard/monitor connection to the VM,
-useful when networking or SSH is broken.
 
 ## Where to go next
 

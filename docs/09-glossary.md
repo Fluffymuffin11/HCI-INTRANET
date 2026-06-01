@@ -1,62 +1,60 @@
 # 09 — Glossary
 
 A reference for the terms used throughout this documentation. Skim it once,
-then refer back as needed.
+then refer back as needed. Some terms apply only to the **current homelab**
+deployment, others only to the **production target** — these are flagged
+where relevant.
 
 ## Networking
 
-**LAN** (Local Area Network) — the practice's internal network, on the
-Huntsville Hospital corporate VLAN. Devices on the LAN can reach the
-intranet directly.
+**LAN** (Local Area Network) — the practice's internal network. Today the
+homelab LAN; in production, the Huntsville Hospital corporate VLAN.
+
+**Tailscale** (homelab only) — a mesh VPN that gives every authorized device
+a `100.x.y.z` address. Used for remote admin access in the homelab.
+Removed in production.
+
+**Tailnet** (homelab only) — a Tailscale network owned by one account.
 
 **Reverse proxy** — a server that accepts requests on behalf of another.
-Here, nginx accepts HTTPS requests on port 443 and forwards them to the
-Fastify backend on port 3000.
+Here, nginx accepts HTTP (homelab) or HTTPS (production) requests and
+forwards them to the backend on port 3000.
 
 **Docker bridge network** — a virtual switch that lets containers talk to
 each other by name. The intranet uses `intranet_default`.
 
-**Docker bridge gateway** — the host-side endpoint of the Docker bridge
-(typically `172.18.0.1`). Containers reach the host's networking through
-this address. The Fastify backend uses it to reach PostgreSQL on the host.
+**Docker bridge gateway** (target) — the host-side endpoint of the Docker
+bridge (typically `172.18.0.1`). In production the Fastify backend uses it
+to reach PostgreSQL on the host.
 
-**`host.docker.internal`** — a hostname Docker can be configured to provide
-inside containers, resolving to the host machine. The backend's
-`DATABASE_URL` uses this to find PostgreSQL.
+**`host.docker.internal`** (target) — hostname Docker can provide inside
+containers, resolving to the host. The backend's `DATABASE_URL` uses this.
 
-**Loopback** — `127.0.0.1`, the address that always means "this machine."
+**Loopback** — `127.0.0.1`, "this machine."
 
 ## Operating system
 
 **RHEL** — Red Hat Enterprise Linux. The OS this VM runs.
 
-**dnf** — RHEL's package manager. Equivalent to `apt` on Debian/Ubuntu.
+**dnf** — RHEL's package manager.
 
-**rpm** — the low-level package format used by dnf. You will rarely call
-`rpm` directly.
+**rpm** — the low-level package format used by dnf.
 
-**systemd** — RHEL's init system and service manager. Started at boot,
-runs everything else (PostgreSQL, Docker, sshd, etc.).
+**systemd** — RHEL's init system and service manager.
 
-**systemctl** — the command to control systemd units (start, stop,
-enable, status).
+**systemctl** — the command to control systemd units.
 
-**Unit / service** — a thing systemd manages. Lives in `/usr/lib/systemd/`
-or `/etc/systemd/`.
+**Unit / service** — a thing systemd manages.
 
-**journald / journalctl** — systemd's log collector and the tool to
-query it.
+**journald / journalctl** — systemd's log collector and query tool.
 
-**SELinux** — Red Hat's mandatory access control system. Adds an extra
-layer of security on top of file permissions. Modes: `Enforcing`,
-`Permissive`, `Disabled`.
+**SELinux** — Red Hat's mandatory access control system.
 
-**firewalld** — RHEL's firewall manager. Wraps `nftables`.
+**firewalld** — RHEL's firewall manager.
 
-**SSH** — Secure Shell. The encrypted remote-login protocol on port 22.
+**SSH** — Secure Shell. Encrypted remote-login protocol on port 22.
 
-**Cockpit** — Red Hat's web-based system administration console,
-typically on port 9090.
+**Cockpit** — Red Hat's web-based system administration console (port 9090).
 
 ## Application stack
 
@@ -64,15 +62,17 @@ typically on port 9090.
 loads and JavaScript handles all subsequent navigation. The employee-facing
 React app is an SPA.
 
-**Fastify** — A fast, low-overhead web framework for Node.js. Used here in
-place of Express for better performance and built-in schema validation.
+**Express** (homelab) — the current Node.js web framework. Single-file
+backend in `app/server.js`.
+
+**Fastify** (target) — A fast, low-overhead web framework for Node.js.
+Replaces Express in production. Modular plugins replace middleware.
 
 **REST API** — the HTTP-based interface exposed by the backend. Verbs:
 GET, POST, PATCH, DELETE.
 
 **Session** — a server-side record that identifies a logged-in user.
-Identified by a cookie the browser sends with every request. Stored in
-the PostgreSQL Session table.
+Identified by a cookie the browser sends with every request.
 
 **Session secret** — a random string used to cryptographically sign session
 cookies. Stored in `/srv/intranet/.env` as `SESSION_SECRET`.
@@ -80,142 +80,142 @@ cookies. Stored in `/srv/intranet/.env` as `SESSION_SECRET`.
 **bcrypt** — a password hashing algorithm. Slow on purpose, to resist
 brute-force attacks.
 
-**Plugin** (Fastify) — a piece of functionality registered onto the Fastify
-instance (auth, session handling, file uploads, rate-limiting). Replaces
-"middleware" terminology used by Express.
+**Middleware / Plugin** — A piece of functionality that runs in the request
+pipeline. Express calls them middleware; Fastify calls them plugins. We use
+them for authentication checks, session handling, file uploads, rate-limiting.
 
-**ORM** — an Object-Relational Mapper. **This project uses Prisma** as its
-ORM; the application reads and writes the database through Prisma's
-generated type-safe client rather than handwritten SQL.
+**ORM** — an Object-Relational Mapper. The current homelab implementation
+does NOT use one; SQL is written directly via `better-sqlite3`. The
+production target uses **Prisma**, a type-safe ORM.
 
-**Prisma** — A modern Node.js ORM. The schema is defined in
-`prisma/schema.prisma`, migrations live in `prisma/migrations/`, and the
-generated client (`@prisma/client`) is what the Fastify routes call.
+**Prisma** (target) — A modern Node.js ORM. Schema in `prisma/schema.prisma`,
+migrations under `prisma/migrations/`, generated client at `@prisma/client`.
 
-**Migration** (Prisma) — A versioned SQL file that brings the database
+**Migration** (target) — A versioned SQL file that brings the database
 schema from one state to the next. Applied automatically on backend
 startup via `prisma migrate deploy`.
 
 ## Database
 
-**PostgreSQL** — A mature, open-source relational database. Runs as a
-multi-process server on the RHEL host (not in a container in this
-deployment). Listens on TCP port 5432.
+**SQLite** (homelab) — A file-based SQL database. The whole database is one
+`.db` file. No separate server process. Today's implementation uses
+`better-sqlite3` for synchronous in-process access.
 
-**psql** — PostgreSQL's command-line client. DBAs and operators use it
-to run queries.
+**PostgreSQL** (target) — A mature, open-source relational database. Runs
+as a multi-process server on the host (not in a container). Listens on
+TCP port 5432.
 
-**pg_dump / pg_restore** — PostgreSQL's logical backup and restore tools.
-Used for nightly database backups (`-Fc` produces a compressed
-custom-format dump that `pg_restore` can apply selectively).
+**psql** (target) — PostgreSQL's command-line client.
 
-**WAL** (Write-Ahead Log) — PostgreSQL's transaction log. Every change is
-written to the WAL before being applied to data files, allowing crash
-recovery and replication.
+**pg_dump / pg_restore** (target) — PostgreSQL's logical backup and restore
+tools. `-Fc` produces a compressed custom-format dump.
 
-**Role / User** (PostgreSQL) — A database principal. The intranet uses:
-- `intranet_app` — application backend (read/write)
-- `intranet_ro` — read-only for reporting
-- `dba_group` — DBA role with full privileges, granted to individual DBA accounts
+**WAL** (Write-Ahead Log) — A journal of pending changes. Both SQLite and
+PostgreSQL use it for crash recovery.
 
-**pg_hba.conf** — PostgreSQL's host-based authentication file. Decides
-which network ranges and which users can connect, and with what
-authentication method (`scram-sha-256` in production).
+**Role / User** (PostgreSQL, target) — A database principal. The intranet
+plans to use `intranet_app`, `intranet_ro`, and `dba_group`.
+
+**pg_hba.conf** (target) — PostgreSQL's host-based authentication file.
 
 ## Containers and Docker
 
-**Container** — a sandboxed process running on the host kernel with its
-own filesystem and network namespace. Not a VM.
+**Container** — a sandboxed process running on the host kernel.
 
-**Image** — a snapshot of a filesystem used to start containers. Built
-from a `Dockerfile`. We use stock public images, no custom Dockerfile.
+**Image** — a snapshot of a filesystem used to start containers. We use
+stock public images.
 
 **Docker Compose** — a tool that defines and runs multi-container apps
 from a single `docker-compose.yml` file.
 
 **Bind mount** — exposing a host directory inside a container. The host
-filesystem is canonical; the container sees a window into it.
+filesystem is canonical.
 
-**Volume** (named) — a Docker-managed storage area. We do not use named
-volumes; only bind mounts.
+**Volume (named)** — a Docker-managed storage area. We do not use these;
+only bind mounts.
 
 **Restart policy** — Docker's instruction for what to do when a container
-stops. We use `unless-stopped` (auto-restart unless explicitly stopped).
+stops. We use `unless-stopped`.
 
-**`extra_hosts`** — A Compose directive that injects entries into a
-container's `/etc/hosts`. We use it to give the backend container a
-reachable name for the host (`host.docker.internal`).
+**`extra_hosts`** (target) — A Compose directive that injects entries into
+a container's `/etc/hosts`. Used in production to give the backend a way
+to reach the host as `host.docker.internal`.
 
 ## Security and TLS
 
-**TLS** (Transport Layer Security) — the protocol behind HTTPS. Encrypts
-traffic and verifies server identity.
+**TLS** (Transport Layer Security) — the protocol behind HTTPS.
 
 **Certificate** — A cryptographic document binding a hostname to a public
-key. Ours is issued by the Huntsville Hospital internal Certificate
-Authority and trusted by domain-joined workstations.
+key. In production, issued by the Huntsville Hospital internal CA.
 
-**Private key** — the secret half of a TLS certificate. Lives at
-`/etc/nginx/tls/intranet-hci.key`, mode 0600, owned by root.
+**Private key** — the secret half of a TLS certificate.
 
 **HSTS** (HTTP Strict Transport Security) — A response header that tells
-browsers to use HTTPS only for a given host.
+browsers to use HTTPS only for a given host. Enabled in production.
 
-**CSRF** (Cross-Site Request Forgery) — An attack class where a malicious
-site tricks an authenticated user's browser into making requests to the
-application. Mitigated by the SameSite=Lax cookie attribute used for
-session cookies.
+**CSRF** (Cross-Site Request Forgery) — An attack class mitigated by the
+SameSite=Lax cookie attribute used for session cookies.
 
 ## Virtualization
 
-**vSphere** — VMware's enterprise virtualization platform. Huntsville
-Hospital's production hypervisor environment.
+**Proxmox VE** (homelab) — The hypervisor today. KVM-based.
 
-**ESXi** — The hypervisor itself, the bare-metal OS that runs VMs.
+**vSphere** (target) — VMware's enterprise virtualization platform.
+Huntsville Hospital's production hypervisor environment.
 
-**vCenter** — The management interface for one or more ESXi hosts. Where
-operators go to manage the VM (snapshots, console, power).
+**ESXi** (target) — The hypervisor itself.
 
-**Snapshot** (vSphere) — A point-in-time copy of a VM's disk and memory
-state. Reverting to a snapshot rolls the VM back to that point.
+**vCenter** (target) — The management interface for ESXi hosts.
 
-**OVA / OVF** — Portable VM image formats. Used to migrate VMs between
-vSphere clusters or to other hypervisors.
+**Snapshot** — A point-in-time copy of a VM. Both Proxmox and vSphere offer
+this; rolling back discards changes made after the snapshot.
+
+**OVA / OVF** (target) — Portable VM image formats used for migrating
+between vSphere clusters.
+
+## Remote desktop (homelab only)
+
+**SPICE** — A Linux remote-display protocol. We attempted this with Proxmox
+and abandoned it for RDP.
+
+**RDP** — Microsoft's Remote Desktop Protocol. Used in the homelab via
+`gnome-remote-desktop` on port 3389.
+
+**gnome-remote-desktop** — The GNOME project's RDP server. Used in headless
+mode here, which spawns a fresh GNOME session per connection.
+
+**Wayland** — The modern Linux display server protocol. GNOME on RHEL 10
+runs on Wayland by default.
+
+**Mutter** — GNOME's window manager / compositor.
 
 ## Storage
 
-**LVM** (Logical Volume Manager) — A Linux abstraction over physical
-disks. Our root filesystem is on the LVM logical volume `rhel-root`.
+**LVM** (Logical Volume Manager) — A Linux abstraction over physical disks.
 
 **xfs** — The default filesystem on RHEL 10.
 
-**inode** — A filesystem object that holds metadata. Filesystems can run
-out of inodes even with disk space free (rare).
+**inode** — A filesystem object that holds metadata.
 
 ## Frontend
 
 **React** — A JavaScript library for building user interfaces. The
 employee-facing site is a React 19 application.
 
-**React Router** — Routing for single-page apps. Maps URL paths to React
-components without a full page reload.
+**React Router** — Routing for SPAs.
 
-**Tailwind** — A utility-class CSS framework. Used in the React frontend.
+**Tailwind** — A utility-class CSS framework.
 
-**Vite** — A modern frontend build tool. We use it to build the React
-app for production.
+**Vite** — A modern frontend build tool.
 
-**JSX** — JavaScript with embedded XML-like syntax. React component files
-use this.
+**JSX** — JavaScript with embedded XML-like syntax.
 
 ## Miscellaneous
 
-**dotfile** — A file or directory whose name starts with `.`. Hidden by
-default in `ls`.
+**dotfile** — A file or directory whose name starts with `.`.
 
 **SIGTERM / SIGKILL** — Process signals. SIGTERM asks a process to clean
-up and exit; SIGKILL terminates immediately. `docker compose stop` sends
-SIGTERM, then SIGKILL after 10 seconds if the container has not exited.
+up and exit; SIGKILL terminates immediately.
 
 ## Common abbreviations used in this document
 
@@ -229,3 +229,5 @@ SIGTERM, then SIGKILL after 10 seconds if the container has not exited.
 - `ro / rw` — read-only / read-write
 - `FQDN` — fully qualified domain name
 - `DBA` — database administrator
+- `CA` — certificate authority
+- `RDBMS` — relational database management system

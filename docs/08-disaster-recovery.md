@@ -1,26 +1,26 @@
 # 08 — Disaster Recovery
 
 This document covers **what to do when something is broken badly enough that
-routine maintenance can't fix it.** The procedures here assume you have
-backups (see [`06-maintenance.md`](06-maintenance.md) → *Backups*).
+routine maintenance can't fix it.** The procedures here describe recovery
+for the current SQLite-based homelab deployment; the production migration
+callout at the end describes the equivalent Postgres-based procedures.
 
-## Recovery scenarios
+## Recovery scenarios (current)
 
 ```
    Scenario                              First step
    ----------------------------------    ----------------------------------
-   Database corruption                   Restore database from pg_dump
+   SQLite DB corrupted                   Restore intranet.db from backup
    Files deleted from /uploads/          Restore uploads from backup
    /srv/intranet/ wiped entirely         Full application restore
-   Whole VM unbootable                   Roll back from vSphere snapshot
-   Hardware failure on vSphere host      Restore VM image to another host
+   Whole VM unbootable                   Boot from Proxmox snapshot
+   Proxmox host fails                    Restore VM image to new host
 ```
 
-## Scenario 1 — Database is corrupted
+## Scenario 1 — SQLite database is corrupted
 
-**Symptom:** Backend keeps crashing with PostgreSQL errors, or a query like
-`psql -d intranet_hci -c "\dt"` returns connection or relation errors that
-shouldn't be possible.
+**Symptom:** Backend keeps crashing with SQLite errors, or
+`sqlite3 intranet.db ".tables"` returns "file is not a database."
 
 **Recovery steps:**
 
@@ -29,233 +29,218 @@ shouldn't be possible.
 $ cd /srv/intranet
 $ docker compose stop backend
 
-# 2. Confirm PostgreSQL itself is still running on the host
-$ sudo systemctl status postgresql
+# 2. Move the bad database aside (don't delete — useful for forensics)
+$ sudo mv data/intranet.db data/intranet.db.broken-$(date +%Y%m%d)
 
-# 3. Take a snapshot of the bad state for forensics (do not skip)
-$ sudo -u postgres pg_dump -Fc intranet_hci > \
-    /var/backups/intranet/intranet-BROKEN-$(date +%Y%m%d-%H%M%S).dump
+# 3. Find your latest good backup
+$ ls -lh /var/backups/intranet/intranet-*.tar.gz
 
-# 4. Find your latest good backup
-$ ls -lh /var/backups/intranet/intranet-*.dump
+# 4. Extract just the database snapshot from the backup
+$ sudo tar -xzf /var/backups/intranet/intranet-YYYYMMDD-HHMMSS.tar.gz \
+    -C /tmp intranet/data/intranet-snapshot.db
+$ sudo cp /tmp/intranet/data/intranet-snapshot.db /srv/intranet/data/intranet.db
+$ sudo chown <user>:<user> /srv/intranet/data/intranet.db
 
-# 5. Drop the corrupted database and restore from backup
-$ sudo -u postgres psql -c "DROP DATABASE intranet_hci;"
-$ sudo -u postgres psql -c "CREATE DATABASE intranet_hci OWNER intranet_app;"
-$ sudo -u postgres pg_restore --no-owner --role=intranet_app \
-    -d intranet_hci /var/backups/intranet/intranet-YYYYMMDD-HHMMSS.dump
-
-# 6. Restart and verify
+# 5. Restart and verify
 $ docker compose start backend
-$ docker compose logs -f backend           # watch for errors
-$ curl -sk https://Intranet-HCI.heart.local/api/health
+$ docker compose logs -f backend
+$ curl http://localhost:8080/api/health
 ```
 
-⚠️ Restoring the DB rolls back to the backup time. Any posts, signups, or
+⚠️ Restoring the DB rolls back to the backup time. Posts, signups, and
 nominations made after the backup are **lost**. Communicate to users.
 
 ## Scenario 2 — Uploads directory missing or wiped
-
-**Symptom:** Images show as broken; `/srv/intranet/uploads/` is empty or
-missing files.
-
-**Recovery:**
 
 ```bash
 $ docker compose stop backend                          # avoid mid-write
 
 # Extract uploads from the backup
-$ sudo tar -xzf /var/backups/intranet/intranet-uploads-LATEST.tar.gz \
-    -C /srv/intranet/uploads                           # restores in place
+$ sudo tar -xzf /var/backups/intranet/intranet-LATEST.tar.gz \
+    -C / srv/intranet/uploads
 
 # Verify
 $ ls /srv/intranet/uploads/ | head
 $ docker compose start backend
 ```
 
-If only **some** files are missing (a user deleted a folder), extract the
-backup to a temp directory and copy in only what you need:
+If only some files are missing, extract to a temp dir and copy in only
+what you need:
 
 ```bash
 $ mkdir /tmp/restore
-$ sudo tar -xzf /var/backups/intranet/intranet-uploads-LATEST.tar.gz -C /tmp/restore
-$ ls /tmp/restore/
-$ sudo cp /tmp/restore/<file> /srv/intranet/uploads/
+$ sudo tar -xzf /var/backups/intranet/intranet-LATEST.tar.gz -C /tmp/restore
+$ sudo cp /tmp/restore/srv/intranet/uploads/<file> /srv/intranet/uploads/
 $ sudo rm -rf /tmp/restore
 ```
 
 ## Scenario 3 — Whole `/srv/intranet/` is gone
 
-**Symptom:** Application files deleted, project directory empty, or
-ransomware-like situation.
-
-**Recovery:**
-
 ```bash
-# 1. Re-clone source code from the internal git repository
+# 1. Reinstall the directory layout from backup
 $ sudo mkdir -p /srv/intranet
-$ sudo chown <ops-user>:<ops-user> /srv/intranet
-$ cd /srv
-$ git clone https://<internal-git>/heart-center/intranet.git
+$ sudo tar -xzf /home/<user>/intranet-full-backup.tar.gz -C /srv
 
-# 2. Restore uploads from backup
-$ sudo tar -xzf /var/backups/intranet/intranet-uploads-LATEST.tar.gz \
-    -C /srv/intranet/uploads
+# 2. If your backups only include data/ and uploads/, re-pull source
+#    code from the internal git repo.
 
-# 3. Re-create the .env file
-$ openssl rand -hex 48                                # generate SESSION_SECRET
-$ sudo nano /srv/intranet/.env
-# Paste these lines, filling in real values:
-#   SESSION_SECRET=<hex from openssl>
-#   DATABASE_URL=postgresql://intranet_app:<pw>@host.docker.internal:5432/intranet_hci
-#   INITIAL_ADMIN_PASSWORD=<set if seeding fresh>
+# 3. Make sure .env is present
+$ ls -la /srv/intranet/.env
+# If missing, generate a NEW session secret (logs everyone out):
+$ openssl rand -hex 48 | sudo tee /srv/intranet/.env
+$ sudo vi /srv/intranet/.env
+# File should contain one line:  SESSION_SECRET=<the-hex-string>
 
-# 4. The database is intact (it lives in /var/lib/pgsql/data and is
-#    not affected when /srv/intranet/ is wiped). If it is also gone,
-#    follow Scenario 1 first.
-
-# 5. Build the frontend
+# 4. Rebuild the frontend if dist/ is empty
 $ cd /srv/intranet/frontend
 $ npm install
 $ npm run build
 
-# 6. Bring the containers back up
+# 5. Bring it back up
 $ cd /srv/intranet
 $ docker compose up -d
 $ docker compose logs -f
 ```
 
-## Scenario 4 — PostgreSQL data directory is corrupted
+## Scenario 4 — VM won't boot
 
-**Symptom:** `systemctl status postgresql` shows the service failed to start
-with errors about WAL files, missing tablespaces, or page checksum failures.
+This is where **Proxmox snapshots** save you. If snapshots exist:
 
-**Recovery:**
+1. Open the Proxmox web UI
+2. Select VM **101** → **Snapshots** tab
+3. Pick the most recent good snapshot → **Rollback**
+4. The VM reverts
 
-```bash
-# 1. Stop PostgreSQL
-$ sudo systemctl stop postgresql
-
-# 2. Preserve the broken data dir for forensics
-$ sudo mv /var/lib/pgsql/data /var/lib/pgsql/data.broken-$(date +%Y%m%d)
-
-# 3. Initialize a fresh data dir
-$ sudo /usr/bin/postgresql-setup --initdb
-
-# 4. Restore the configs from your config backup or re-run the steps in
-#    04-deployment.md to recreate postgresql.conf, pg_hba.conf, users.
-$ sudo systemctl start postgresql
-
-# 5. Recreate database and restore from pg_dump
-$ sudo -u postgres psql -c "CREATE DATABASE intranet_hci OWNER intranet_app;"
-$ sudo -u postgres pg_restore --no-owner --role=intranet_app \
-    -d intranet_hci /var/backups/intranet/intranet-LATEST.dump
-
-# 6. Restart the backend
-$ cd /srv/intranet && docker compose restart backend
-```
-
-## Scenario 5 — VM won't boot
-
-**Symptom:** VM hangs at boot, kernel panic, root filesystem unmountable.
-
-This is where **vSphere snapshots** save you. If snapshots were taken before
-the trouble started:
-
-1. Open the vSphere Client (vCenter)
-2. Locate VM `Intranet-HCI` in the inventory
-3. Right-click → Snapshots → Manage Snapshots
-4. Select the most recent good snapshot → **Revert**
-5. The VM reverts to that point in time
-
-⚠️ Reverting to a snapshot discards everything that happened after it,
-including database rows and uploaded files. **Combine with a recent
-backup restore** (Scenarios 1 and 2) to get back the latest data.
+⚠️ Rolling back discards everything after the snapshot, including database
+rows and uploaded files. **Combine with a recent backup restore.**
 
 ### If no snapshots exist
 
 If the VM disk is intact but the OS won't boot:
 
-1. From vSphere, attach the RHEL boot ISO to the VM
-2. Power-cycle the VM and boot to "Rescue installed system"
-3. The installer mounts your existing root at `/mnt/sysimage`
-4. `chroot /mnt/sysimage`
-5. Diagnose: `journalctl -xb` for the last boot, `dnf history` for recent
-   package operations, check `/etc/fstab` for mount typos
-6. `exit`, detach the ISO, reboot
+1. From Proxmox, **boot a rescue ISO** (RHEL boot media → "Rescue installed system")
+2. It mounts your existing root at `/mnt/sysimage`
+3. `chroot /mnt/sysimage`
+4. Diagnose: `journalctl -xb`, `dnf history`, check `/etc/fstab`
+5. `exit`, reboot
 
-## Scenario 6 — Total hypervisor loss
-
-**Symptom:** The vSphere host (or the whole cluster) is gone — fire, theft,
-storage failure beyond recovery.
-
-This is the worst case. Recovery depends on what you have off-site:
+## Scenario 5 — Total Proxmox host loss
 
 | Off-site asset | Restore path |
 |---|---|
-| Tar/PGDump backups (recent) on a NAS | Provision a new RHEL VM, run through `04-deployment.md`, restore data (Scenarios 1, 2) |
-| vSphere snapshot exported as OVA | Import the OVA into another vSphere cluster |
-| Only the pg_dump + uploads tar | Build a fresh RHEL VM, install Docker + PostgreSQL, restore |
+| Tar backups on a NAS | Stand up a new VM, run Scenario 3 |
+| Proxmox vzdump of the whole VM | Restore `.vma` to a new Proxmox host |
+| Only the SQLite + uploads | Build fresh RHEL VM, install Docker, place files, deploy |
 | Nothing | Rebuild from scratch using this documentation as the guide |
 
-The lesson: **always have at least the PostgreSQL dumps and uploads tar
-stored off the vSphere cluster.** Hospital backup policy should already
-cover this; verify with the backup administrator.
+The lesson: **always have at least the data backups stored off the
+hypervisor.**
 
 ## Recovery time objectives (informational)
 
-These are **estimates** for an experienced operator with backups available:
+| Scenario | Estimated downtime |
+|---|---|
+| Database corruption only | 5–10 minutes |
+| Uploads only | 10–30 minutes (depends on size) |
+| `/srv/intranet/` wiped | 30–60 minutes |
+| VM unbootable, snapshot available | 5–15 minutes |
+| VM unbootable, no snapshot | 1–3 hours |
+| Total hypervisor loss | 4–8 hours |
+
+## Testing your recovery procedure
+
+⚠️ **A backup you have never restored is not a backup.** Test quarterly:
+
+```bash
+# 1. Scratch directory
+$ mkdir /tmp/restore-test
+
+# 2. Extract latest backup
+$ sudo tar -xzf /var/backups/intranet/intranet-LATEST.tar.gz -C /tmp/restore-test
+
+# 3. Check the database is readable
+$ sudo sqlite3 /tmp/restore-test/srv/intranet/data/intranet-snapshot.db \
+    "SELECT COUNT(*) FROM users; SELECT COUNT(*) FROM posts;"
+
+# 4. Spot-check uploads
+$ ls /tmp/restore-test/srv/intranet/uploads/ | head
+$ file /tmp/restore-test/srv/intranet/uploads/* | head
+
+# 5. Clean up
+$ sudo rm -rf /tmp/restore-test
+```
+
+If any step fails, your backups are not viable.
+
+---
+
+## 🔄 Production migration
+
+Every scenario above translates to a Postgres equivalent in production:
+
+### Scenario 1 (database) — Postgres version
+
+```bash
+$ docker compose stop backend
+
+# Take a forensic dump of the broken state
+$ sudo -u postgres pg_dump -Fc intranet_hci > \
+    /var/backups/intranet/intranet-BROKEN-$(date +%Y%m%d-%H%M%S).dump
+
+# Drop and recreate
+$ sudo -u postgres psql -c "DROP DATABASE intranet_hci;"
+$ sudo -u postgres psql -c "CREATE DATABASE intranet_hci OWNER intranet_app;"
+$ sudo -u postgres pg_restore --no-owner --role=intranet_app \
+    -d intranet_hci /var/backups/intranet/intranet-db-LATEST.dump
+
+$ docker compose start backend
+```
+
+### Scenario 4 (boot) — vSphere version
+
+In production, snapshots are taken in the vSphere Client:
+1. Right-click VM `Intranet-HCI` → Snapshots → Manage Snapshots
+2. Select a snapshot → **Revert**
+
+OVA exports replace `vzdump` for migrating to another hypervisor.
+
+### New scenario in production: Postgres data dir corrupted
+
+If `/var/lib/pgsql/data` is corrupted but the VM otherwise boots:
+
+```bash
+$ sudo systemctl stop postgresql
+$ sudo mv /var/lib/pgsql/data /var/lib/pgsql/data.broken-$(date +%Y%m%d)
+$ sudo /usr/bin/postgresql-setup --initdb
+# Re-configure postgresql.conf and pg_hba.conf from configuration backup
+$ sudo systemctl start postgresql
+$ sudo -u postgres psql -c "CREATE DATABASE intranet_hci OWNER intranet_app;"
+$ sudo -u postgres pg_restore --no-owner --role=intranet_app \
+    -d intranet_hci /var/backups/intranet/intranet-db-LATEST.dump
+$ cd /srv/intranet && docker compose restart backend
+```
+
+### Updated recovery time objectives (target)
 
 | Scenario | Estimated downtime |
 |---|---|
 | Database corruption only | 10–20 minutes |
-| Uploads only | 10–30 minutes (depends on size) |
-| `/srv/intranet/` wiped | 30–60 minutes |
 | Postgres data dir corrupted | 20–45 minutes |
+| Uploads only | 10–30 minutes |
+| `/srv/intranet/` wiped | 30–60 minutes |
 | VM unbootable, snapshot available | 5–15 minutes |
 | VM unbootable, no snapshot | 1–3 hours |
-| Total hypervisor loss, full rebuild | 4–8 hours |
-
-## Testing your recovery procedure
-
-⚠️ **A backup you have never restored is not a backup.** Test once a
-quarter:
-
-```bash
-# 1. Create a scratch database
-$ sudo -u postgres psql -c "CREATE DATABASE intranet_hci_test;"
-
-# 2. Restore your latest pg_dump into it
-$ sudo -u postgres pg_restore --no-owner --role=intranet_app \
-    -d intranet_hci_test /var/backups/intranet/intranet-LATEST.dump
-
-# 3. Sanity-check row counts
-$ sudo -u postgres psql -d intranet_hci_test -c \
-    "SELECT 'users', COUNT(*) FROM users
-     UNION ALL
-     SELECT 'posts', COUNT(*) FROM posts;"
-
-# 4. Drop the test database
-$ sudo -u postgres psql -c "DROP DATABASE intranet_hci_test;"
-
-# 5. Spot-check uploads tarball
-$ tar -tzf /var/backups/intranet/intranet-uploads-LATEST.tar.gz | head
-```
-
-If any step fails, **your backups are not viable** and you need to fix the
-backup procedure before something real breaks.
+| Total vSphere host loss | 4–8 hours |
 
 ## Building a runbook for your specific environment
 
-Once a year, sit down and write a one-page "if I had to do this from scratch
-today" document:
+Once a year, write a one-page "if I had to do this from scratch today" doc:
 
 - Where do the backups live? (Path, hostname, credentials)
-- Who is the responsible IT-Operations point of contact?
-- Where is the vSphere / vCenter login? (URL, credentials in the password manager)
-- Where is the Red Hat subscription tied to? (Account, contact email)
-- Who is the database administrator on call?
-- Who else knows? (Designate a backup operator)
+- Who is the Proxmox / vSphere admin contact?
+- Who owns the Tailscale tailnet (homelab) or hospital corp network (production)?
+- Where is the Red Hat subscription tied to?
+- Who else knows? Designate a backup operator.
 
-Store this off-site too. Print a copy. The day you need it, you will not
-have internet access.
+Store this off-site. Print a copy. The day you need it, you may not have
+internet access.

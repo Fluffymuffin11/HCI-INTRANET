@@ -1,16 +1,18 @@
 # 07 — Troubleshooting
 
-This is a **playbook of known problems and their fixes**. When something is
-broken, find the matching symptom and follow the steps.
+This is a **playbook of known problems and their fixes** for the current
+homelab deployment. When something is broken, find the matching symptom and
+follow the steps. Issues marked **(target)** apply to the production
+PostgreSQL migration, not the current SQLite system.
 
 ## How to use this document
 
 ```
    1. Identify the layer that's broken:
-      • Can you SSH in?                            → OS is up
-      • Does the website respond at all?           → nginx is up
-      • Does /api/health work?                     → backend is up
-      • Do API calls return data?                  → database is reachable
+      • Can you SSH in?                            -> OS is up
+      • Does the website respond at all?           -> nginx is up
+      • Does /api/health work?                     -> backend is up
+      • Do API calls return data?                  -> database is reachable
 
    2. Look for matching symptom below
 
@@ -26,10 +28,11 @@ broken, find the matching symptom and follow the steps.
 - [Uploaded files don't appear](#uploaded-files-dont-appear)
 - [RDP connection hangs at "connecting"](#rdp-connection-hangs-at-connecting)
 - [RDP error 0x207 (Windows App)](#rdp-error-0x207-windows-app)
+- [Tailscale is offline](#tailscale-is-offline)
 - [SSH refuses connection](#ssh-refuses-connection)
 - [Disk is full](#disk-is-full)
 - [Containers keep restarting](#containers-keep-restarting)
-- [The database is locked](#the-database-is-locked)
+- [The SQLite database is locked](#the-sqlite-database-is-locked)
 - [I forgot the admin password](#i-forgot-the-admin-password)
 - [SELinux is blocking something](#selinux-is-blocking-something)
 - [GPG check failed during dnf upgrade](#gpg-check-failed-during-dnf-upgrade)
@@ -38,16 +41,16 @@ broken, find the matching symptom and follow the steps.
 
 ## Website is completely down
 
-**Symptom:** Browser cannot reach `https://Intranet-HCI.heart.local/`. Connection
+**Symptom:** Browser cannot reach `http://<vm-ip>:8080/`. Connection
 refused, or times out.
 
 **Triage:**
 ```bash
-$ ssh bryant@Intranet-HCI.heart.local         # can you log in?
-$ ping <vsphere-assigned-ip>                # is the VM on the network?
+$ ssh <user>@<tailscale-ip>         # can you log in?
+$ ping <lan-ip>                     # is the VM on the network?
 ```
 
-If you cannot ping or SSH, the VM is down or off the network. Check vSphere.
+If you cannot ping or SSH, the VM is down or off the network. Check Proxmox.
 
 If you can SSH, continue:
 
@@ -61,24 +64,21 @@ $ curl -I http://localhost:8080/    # local probe
 **Common causes and fixes:**
 
 1. **Containers stopped** — `docker compose up -d`
-2. **Backend in restart loop** — `docker compose logs --tail=200 backend` reveals
-   why. Usually `SESSION_SECRET` missing or a syntax error in `server.js`.
-3. **nginx misconfig** — `docker compose logs --tail=50 web` shows nginx errors.
-   Look for "host not found in upstream" → means backend died.
-4. **Firewall blocking port 8080** — `sudo firewall-cmd --list-all` should show
-   `ports: 3389/tcp 8080/tcp …`. Re-add if missing:
+2. **Backend in restart loop** — `docker compose logs --tail=200 backend`
+   reveals why. Usually `SESSION_SECRET` missing or a syntax error in
+   `server.js`.
+3. **nginx misconfig** — `docker compose logs --tail=50 web` shows nginx
+   errors. "Host not found in upstream" means backend died.
+4. **Firewall blocking port 8080**:
    ```bash
    $ sudo firewall-cmd --permanent --add-port=8080/tcp
    $ sudo firewall-cmd --reload
    ```
-5. **Disk full** — `df -h /`. If above 95%, see [Disk is full](#disk-is-full).
+5. **Disk full** — `df -h /`. See [Disk is full](#disk-is-full).
 
 ---
 
 ## Website loads but shows error / blank page
-
-**Symptom:** Browser reaches the site but shows a blank screen, JavaScript error,
-or HTTP 502 / 504 from nginx.
 
 **Triage:**
 ```bash
@@ -86,8 +86,8 @@ $ curl -i http://localhost:8080/api/health     # backend alive?
 $ docker compose logs --tail=100 backend
 ```
 
-**HTTP 502 Bad Gateway:** nginx can reach the backend container but the
-backend isn't responding. Restart it:
+**HTTP 502 Bad Gateway:** nginx can reach the backend but the backend isn't
+responding. Restart it:
 ```bash
 $ docker compose restart backend
 $ docker compose logs -f backend
@@ -95,11 +95,11 @@ $ docker compose logs -f backend
 
 **HTTP 504 Gateway Timeout:** backend is slow. Check load:
 ```bash
-$ top                                # is something pegged at 100% CPU?
+$ top                                # is something at 100% CPU?
 $ docker stats                       # container-level CPU/memory
 ```
 
-**Blank page in browser:** the React build is stale or broken. Rebuild:
+**Blank page:** the React build is stale. Rebuild:
 ```bash
 $ cd /srv/intranet/frontend
 $ npm run build
@@ -109,40 +109,30 @@ $ npm run build
 
 ## API calls return 401 / "Not logged in"
 
-**Symptom:** You can see the site, but most API calls return 401.
+**Cause:** Session cookie expired or `SESSION_SECRET` changed.
 
-**Cause:** Your session cookie expired or the `SESSION_SECRET` changed.
-
-**Fix:** Log out and back in. If that fails for everyone, check that the
-backend started with the secret:
+**Fix:** Log out and back in. If that fails for everyone, check the backend
+started with the secret:
 ```bash
 $ docker compose logs backend | grep -i secret
 # Should NOT see "FATAL: SESSION_SECRET environment variable is not set"
-```
-
-If the backend can't read `.env`:
-```bash
-$ ls -l /srv/intranet/.env
-$ cat /srv/intranet/.env       # confirm a value exists
 ```
 
 ---
 
 ## Login keeps failing
 
-**Symptom:** correct username/password but login fails.
-
 **Possible causes:**
 
-1. **Rate limited.** After 20 failed attempts in 15 minutes, the IP is blocked.
-   Wait or restart the backend:
+1. **Rate limited.** 20 failed attempts in 15 minutes blocks the IP.
+   Restart the backend to clear:
    ```bash
    $ docker compose restart backend
    ```
 
-2. **Wrong password (it happens).** Reset it — see [I forgot the admin password](#i-forgot-the-admin-password).
+2. **Wrong password.** Reset — see [I forgot the admin password](#i-forgot-the-admin-password).
 
-3. **Backend can't write to session table.** Check disk space and permissions:
+3. **Backend can't write to sessions.db.** Check disk and permissions:
    ```bash
    $ df -h /srv
    $ ls -la /srv/intranet/data/
@@ -152,13 +142,11 @@ $ cat /srv/intranet/.env       # confirm a value exists
 
 ## Uploaded files don't appear
 
-**Symptom:** files upload "successfully" but 404 when opened.
-
 **Triage:**
 ```bash
 $ ls -la /srv/intranet/uploads/                    # is the file there?
-$ docker compose exec backend ls -la /uploads/     # visible inside container?
-$ curl -I http://localhost:8080/files/<filename>   # nginx → backend → static
+$ docker compose exec backend ls -la /uploads/     # visible in container?
+$ curl -I http://localhost:8080/files/<filename>
 ```
 
 **Common cause:** the `/uploads` mount got disconnected after a Docker change.
@@ -187,9 +175,9 @@ $ sudo journalctl -u gnome-remote-desktop -n 50   # recent logs
 $ sudo systemctl restart gnome-remote-desktop
 ```
 
-**If credentials are empty in `grdctl status`:**
+**If credentials are empty in `grdctl --system status`:**
 ```bash
-$ sudo grdctl --system rdp set-credentials bryant '<password>'
+$ sudo grdctl --system rdp set-credentials <user> '<password>'
 $ sudo systemctl restart gnome-remote-desktop
 ```
 
@@ -208,14 +196,36 @@ $ sudo systemctl restart gnome-remote-desktop
 
 ## RDP error 0x207 (Windows App)
 
-**Symptom:** Microsoft's "Windows App" on Mac shows error `0x207` and disconnects
-immediately.
+**Symptom:** Microsoft's "Windows App" on Mac shows error `0x207` and
+disconnects immediately.
 
-**Cause:** Headless gnome-remote-desktop uses **RDP server redirection**, which
-Microsoft's Windows App on macOS does not honor.
+**Cause:** Headless gnome-remote-desktop uses **RDP server redirection**,
+which Microsoft's Windows App on macOS does not honor.
 
-**Fix:** Use a different client. Royal TSX (free) handles redirection correctly.
-See [`05-remote-access.md`](05-remote-access.md) → *Recommended client*.
+**Fix:** Use a different client. Royal TSX (free) handles redirection
+correctly. See [`05-remote-access.md`](05-remote-access.md) →
+*Recommended client*.
+
+---
+
+## Tailscale is offline
+
+**Symptom:** The VM doesn't appear in the Tailscale admin console, or
+`tailscale status` shows nothing.
+
+**Fix:**
+```bash
+$ sudo systemctl restart tailscaled
+$ sudo tailscale status                    # current state
+$ sudo tailscale up                        # re-authenticate
+                                           # will print a login URL
+```
+
+If `tailscale up` fails with "logged out":
+```bash
+$ sudo tailscale up --auth-key=tskey-xxxxx
+```
+(generate the auth key in the Tailscale admin console)
 
 ---
 
@@ -223,29 +233,26 @@ See [`05-remote-access.md`](05-remote-access.md) → *Recommended client*.
 
 **Symptom:** `ssh: connect to host … port 22: Connection refused`
 
-**Most likely:** sshd is not running.
-
-From the vSphere console (or any working remote path):
+**Most likely:** sshd is not running. From the Proxmox console:
 ```bash
 $ sudo systemctl status sshd
 $ sudo systemctl start sshd
 $ sudo systemctl enable sshd
 ```
 
-**If you only have an SSH problem from outside the LAN:**
-
-- Check the corporate network: `sudo systemctl status (none)`
-- Check firewall: `sudo firewall-cmd --list-ports` should include `22/tcp` (or
-  via `services: ssh`)
+**If the problem is Tailscale-only:**
+- Check Tailscale: `sudo systemctl status tailscaled`
+- Check firewall: `sudo firewall-cmd --list-ports` should include `22/tcp`
+  via `services: ssh`
 
 ---
 
 ## Disk is full
 
-**Symptom:** Random operations fail with "No space left on device." `df -h /`
-shows above 95% used.
+**Symptom:** Random operations fail with "No space left on device."
+`df -h /` shows above 95% used.
 
-**Quick relief (in order, run as you go):**
+**Quick relief (in order):**
 
 ```bash
 # 1. Old Docker images and build cache
@@ -257,88 +264,69 @@ $ sudo journalctl --vacuum-time=14d
 # 3. DNF cache
 $ sudo dnf clean all
 
-# 4. Anything weird in /tmp
+# 4. Anything in /tmp
 $ sudo du -sh /tmp/*
 $ sudo rm -rf /tmp/<stale-thing>
-
-# 5. The 48 MB backup tarball at /srv/intranet/intranet-backup.tar.gz
-$ ls -lh /srv/intranet/intranet-backup.tar.gz
-# Move it to your home or delete:
-$ mv /srv/intranet/intranet-backup.tar.gz /home/bryant/
 ```
 
-If you cannot find what filled the disk, this command lists the biggest
-directories anywhere:
-
+Find the biggest directories anywhere:
 ```bash
 $ sudo du -h --max-depth=2 / 2>/dev/null | sort -rh | head -30
 ```
-
-**If `/srv/intranet/uploads/` is the problem:** users have uploaded too much.
-Decide what to prune (an admin can delete posts/resources through the website).
-Do not delete files from `/srv/intranet/uploads/` directly — the database
-references them by filename.
 
 ---
 
 ## Containers keep restarting
 
-**Symptom:** `docker compose ps` shows `Restarting` or repeatedly cycling
-between `Up` and `Restarting`.
+**Symptom:** `docker compose ps` shows `Restarting` repeatedly.
 
 **Triage:**
 ```bash
 $ docker compose logs --tail=200 <service>
 ```
 
-Look for the very first error after each restart. Most likely:
+Look for the first error after each restart:
 
-- **Backend:** `SESSION_SECRET` missing or PostgreSQL unreachable
+- **Backend:** `SESSION_SECRET` missing or `intranet.db` corrupted
 - **Backend:** a recent code change has a syntax error
-- **nginx:** `host not found in upstream "backend"` → backend isn't running
-- **nginx:** typo in `/srv/intranet/nginx/default.conf` → test with
+- **nginx:** `host not found in upstream "backend"` -> backend isn't running
+- **nginx:** typo in `nginx/default.conf` -> test with
   `docker compose exec web nginx -t`
 
 ---
 
-## Database errors in the backend logs
+## The SQLite database is locked
 
-**Symptom:** Backend logs show PostgreSQL connection errors:
-`P1001: Can't reach database server`, `P2024: Timed out fetching a connection from the pool`,
-or sustained pool-exhaustion warnings.
+**Symptom:** Backend logs show `SQLITE_BUSY: database is locked`.
 
-**Triage:**
+**Cause:** Something else has the database open (often a manual `sqlite3`
+session left in a forgotten terminal).
+
+**Fix:**
 ```bash
-$ sudo systemctl status postgresql                # database service up?
-$ ss -tlnp | grep 5432                            # listening?
-$ docker compose exec backend sh -c \
-    "nc -zv host.docker.internal 5432"            # reachable from container?
-$ sudo journalctl -u postgresql -n 50             # postgres log tail
+$ docker compose exec backend sh
+/app # ps -ef | grep sqlite
+# kill any stray sqlite3 processes
+/app # exit
+$ docker compose restart backend
 ```
 
-**Common causes and fixes:**
+If the lock persists, the SQLite **WAL journal** may be corrupted. Restore
+from the most recent backup (see [`08-disaster-recovery.md`](08-disaster-recovery.md)).
 
-- **PostgreSQL crashed or didn't start** —
-  `sudo systemctl restart postgresql`
-- **Connection limit reached** — check active connections:
-  `sudo -u postgres psql -c "SELECT count(*) FROM pg_stat_activity;"`.
-  If near `max_connections`, restart the backend to release pooled
-  connections, then consider raising the limit in `postgresql.conf`.
-- **Wrong password in `.env`** — `DATABASE_URL` mismatch with what
-  PostgreSQL expects. Compare to the role's actual password.
-- **`pg_hba.conf` rejecting the connection** — the postgres journal
-  will say "no pg_hba.conf entry" or "password authentication failed".
+**(target)** In the PostgreSQL production deployment this symptom changes
+to "P1001 / P2024 / pool exhaustion" errors. Diagnose with
+`sudo systemctl status postgresql` and `pg_stat_activity` queries.
 
 ---
 
 ## I forgot the admin password
 
-**The Linux admin password** (the `bryant` account):
+**The Linux admin password** (the local user account):
 
-1. From the vSphere Web Console (vCenter) console (you'll need physical or hypervisor access),
-   reboot the VM
+1. From the Proxmox noVNC console, reboot the VM
 2. At the GRUB menu, press `e` to edit the boot entry
-3. Find the line starting with `linux …`, add `rd.break enforcing=0` to the end
+3. Find the line starting with `linux …`, add `rd.break enforcing=0`
 4. Ctrl-X to boot
 5. At the `switch_root:/#` prompt:
    ```
@@ -350,70 +338,54 @@ $ sudo journalctl -u postgresql -n 50             # postgres log tail
    ```
 
 **The application admin password** (the `admin` user in the website):
-See [`06-maintenance.md`](06-maintenance.md) → *Changing the intranet admin password*.
-
----
-
+See [`06-maintenance.md`](06-maintenance.md) →
+*Changing the intranet admin password*.
 
 ---
 
 ## SELinux is blocking something
 
 **Symptom:** A service "should work" but doesn't, and `journalctl` mentions
-"AVC denied" or `setroubleshoot`.
+"AVC denied".
 
 **Check:**
 ```bash
-$ getenforce                                 # current mode (Enforcing/Permissive)
+$ getenforce                                 # current mode
 $ sudo ausearch -m AVC --start recent        # recent denials
 ```
 
-**Quick test:** temporarily set to permissive to confirm it's SELinux:
+**Quick test:** temporarily set permissive to confirm SELinux is the cause:
 ```bash
 $ sudo setenforce 0                          # permissive — NOT persistent
 # test the failing operation
 $ sudo setenforce 1                          # back to enforcing
 ```
 
-If SELinux is the culprit, the **proper** fix is to label files correctly or
-generate a custom policy with `audit2allow`. The lazy fix (don't use long-term)
-is to set permissive mode in `/etc/selinux/config`.
-
-⚠️ Disabling SELinux reduces your security posture. Treat it as a diagnostic
-step, not a fix.
+The **proper** fix is labeling files correctly or generating a custom
+policy with `audit2allow`.
 
 ---
 
 ## GPG check failed during dnf upgrade
 
-**Symptom:** `dnf upgrade` shows messages like:
-
-```
-GPG Keys are configured as: file:///etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release
-The downloaded packages were saved in cache until the next successful transaction.
-Error: GPG check FAILED
-```
-
 **Cause:** A repository pushed a package signed by a key the system doesn't
-trust yet (often happens after enabling EPEL or third-party repos with newer
-keys).
+trust yet.
 
 **Fix options:**
 
-1. Refresh the keys:
+1. Refresh keys:
    ```bash
    $ sudo dnf clean all
    $ sudo subscription-manager refresh
    $ sudo dnf upgrade
    ```
 
-2. If a specific third-party repo (EPEL, etc.) is the culprit, disable it for
-   the upgrade:
+2. If a third-party repo is the culprit (e.g., EPEL):
    ```bash
    $ sudo dnf upgrade --disablerepo=epel
    ```
 
-3. As a last resort, install the new key:
+3. Install the new key:
    ```bash
    $ sudo rpm --import https://path/to/the/repo/KEY
    ```
@@ -422,13 +394,31 @@ keys).
 
 ## When all else fails
 
-Step back and run the **golden three**:
-
 ```bash
-$ cd /srv/intranet && docker compose down && docker compose up -d
+$ docker compose down && docker compose up -d
 $ sudo systemctl reboot
 $ sudo journalctl -xe --since "10 minutes ago"
 ```
 
 If the system still won't come up, restore from backup
 ([`08-disaster-recovery.md`](08-disaster-recovery.md)).
+
+---
+
+## 🔄 Production migration
+
+In production these specific symptoms change or disappear:
+
+| Today's symptom | Production equivalent |
+|---|---|
+| RDP connection hangs | (removed — RDP not installed) |
+| RDP error 0x207 | (removed) |
+| Tailscale is offline | (removed — Tailscale not installed) |
+| SQLite database locked | Replaced by: PostgreSQL pool exhaustion / P1001 / P2024 |
+| `firewall-cmd --add-port=8080/tcp` | `firewall-cmd --add-port=443/tcp` (already open) |
+| Login at `http://<ip>:8080` | Login at `https://Intranet-HCI.heart.local` |
+| Restore SQLite by copying `.db` file | Restore via `pg_restore --no-owner -d intranet_hci` |
+
+A separate playbook for PostgreSQL-specific issues (connection pool, WAL
+size, autovacuum) will be added to v2.0 of this document once production
+has been running long enough to surface real incidents.

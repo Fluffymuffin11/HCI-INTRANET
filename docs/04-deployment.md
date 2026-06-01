@@ -1,47 +1,13 @@
 # 04 — Deployment
 
-This document covers **how the intranet is packaged and run** in production
-— Docker Compose for the application containers, PostgreSQL as a native
-systemd service on the same VM, environment variables, and what happens
-when the system boots.
+This document covers **how the intranet is packaged and run today** — Docker
+Compose, the two application containers, environment variables, and what
+happens when the system boots. The "Production migration" callout at the end
+lists the deployment changes planned for the Huntsville Hospital rollout.
 
-## Single-VM topology
+## Two-container topology (current)
 
-```
-   +-------------------------------------------------------------------+
-   |   Intranet-HCI.heart.local  (RHEL 10 VM on Huntsville vSphere)    |
-   |                                                                   |
-   |   +------------------+              +-----------------------+     |
-   |   |  Docker Compose  |              |  PostgreSQL 16        |     |
-   |   |                  |              |  (systemd service)    |     |
-   |   |  intranet_nginx  |              |                       |     |
-   |   |   :443           |              |  /var/lib/pgsql/data  |     |
-   |   |                  |              |  listens :5432        |     |
-   |   |  intranet_backend +-- 5432 ---->|                       |     |
-   |   |   Fastify, Prisma|  via docker  |  users:                |     |
-   |   |   :3000          |  bridge gw   |    intranet_app       |     |
-   |   |                  |  172.18.0.1  |    intranet_ro        |     |
-   |   +------------------+              |    <dba accounts>     |     |
-   |                                     +-----------------------+     |
-   |                                              ^                    |
-   +----------------------------------------------|--------------------+
-                                                  | TCP 5432
-                                                  |
-                          +---------------------+ |
-                          |  DBA workstations   |-+
-                          |  (psql / DBeaver /  |
-                          |   pgAdmin)          |
-                          +---------------------+
-```
-
-**Key point:** PostgreSQL is **not** in a container. It runs as a regular
-systemd service on the host. The Fastify backend container reaches it via
-the Docker bridge gateway IP (`172.18.0.1`) or, equivalently, via
-`host.docker.internal` when Docker is configured for it.
-
-## The Compose file
-
-`/srv/intranet/docker-compose.yml`:
+`/srv/intranet/docker-compose.yml` defines two services:
 
 ```yaml
 services:
@@ -49,13 +15,12 @@ services:
     image: nginx:1.30-alpine
     container_name: intranet_nginx
     ports:
-      - "443:443"
+      - "8080:80"
     volumes:
       - ./frontend/dist:/usr/share/nginx/html:ro
       - ./public/admin:/admin:ro
       - ./public/manager:/manager:ro
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./nginx/tls:/etc/nginx/tls:ro
     depends_on:
       - backend
     restart: unless-stopped
@@ -64,91 +29,36 @@ services:
     image: node:20-alpine
     container_name: intranet_backend
     working_dir: /app
-    extra_hosts:
-      # Lets the container reach the host as 'host.docker.internal'
-      - "host.docker.internal:host-gateway"
     environment:
       - TZ=America/Chicago
       - NODE_ENV=production
       - SESSION_SECRET=${SESSION_SECRET}
-      - DATABASE_URL=${DATABASE_URL}
-      - INITIAL_ADMIN_PASSWORD=${INITIAL_ADMIN_PASSWORD}
     volumes:
       - ./app:/app
+      - ./data:/data
       - ./uploads:/uploads
-    command: sh -c "npm install && npx prisma migrate deploy && npm start"
+    command: sh -c "npm install && npm start"
     restart: unless-stopped
 ```
 
 ### Key design choices
 
-1. **No custom Dockerfiles.** Stock public images (`nginx:1.30-alpine` and
-   `node:20-alpine`). Application code is bind-mounted.
+1. **No custom Dockerfiles.** Both services use stock public images
+   (`nginx:1.30-alpine` and `node:20-alpine`). The application is supplied
+   via bind-mounted source code.
 
-2. **`npm install` and `prisma migrate deploy` run on every container start.**
-   Dependencies and schema stay in sync with the committed code at every restart.
+2. **`npm install` runs on every container start.** Adding a dependency to
+   `app/package.json` only requires `docker compose restart backend`.
 
-3. **The database runs on the host, not in a container.** This is the
-   deliberate production choice so DBAs can connect directly without
-   container access. The backend reaches PostgreSQL through the Docker bridge.
+3. **All persistent state is bind-mounted from the host.** No Docker named
+   volumes. The host filesystem is canonical.
 
-4. **All persistent application state lives off-container.** Application
-   code, uploads, and TLS certs are bind-mounted from the host filesystem.
-   The database lives on the host filesystem at `/var/lib/pgsql/data`.
+4. **`restart: unless-stopped`** — both services survive Docker daemon
+   restarts and start automatically at boot.
 
-5. **`restart: unless-stopped` on both containers** — they survive Docker
-   daemon restarts and boot automatically.
-
-6. **`extra_hosts` adds `host.docker.internal`** so the connection string can
-   read `host.docker.internal` instead of hard-coding `172.18.0.1`. Either
-   form is acceptable.
-
-## PostgreSQL setup (one-time)
-
-The database is provisioned once during initial deployment of the VM:
-
-```bash
-# 1. Install PostgreSQL 16 from the Red Hat repos
-$ sudo dnf install -y postgresql-server postgresql-contrib
-
-# 2. Initialize the data directory
-$ sudo /usr/bin/postgresql-setup --initdb
-
-# 3. Enable at boot and start now
-$ sudo systemctl enable --now postgresql
-
-# 4. Configure listen_addresses
-$ sudo sed -i "s/^#listen_addresses.*/listen_addresses = '*'/" /var/lib/pgsql/data/postgresql.conf
-
-# 5. Configure host-based authentication (pg_hba.conf)
-$ sudo tee -a /var/lib/pgsql/data/pg_hba.conf <<'HBA'
-# Application backend (from Docker bridge)
-host    intranet_hci   intranet_app    172.18.0.0/16    scram-sha-256
-host    intranet_hci   intranet_ro     172.18.0.0/16    scram-sha-256
-# DBAs on the corporate VLAN
-host    intranet_hci   +dba_group      <corporate-vlan>/16  scram-sha-256
-HBA
-
-# 6. Reload PostgreSQL to pick up the new config
-$ sudo systemctl reload postgresql
-
-# 7. Create database, users, and grants
-$ sudo -u postgres psql <<'SQL'
-CREATE USER intranet_app WITH PASSWORD '<generated-strong-password>';
-CREATE USER intranet_ro  WITH PASSWORD '<generated-strong-password>';
-CREATE ROLE dba_group;
-CREATE DATABASE intranet_hci OWNER intranet_app;
-GRANT CONNECT ON DATABASE intranet_hci TO intranet_ro;
-GRANT CONNECT ON DATABASE intranet_hci TO dba_group;
-SQL
-
-# 8. Open the firewall for DBA access (restricted to the corporate VLAN)
-$ sudo firewall-cmd --permanent --add-port=5432/tcp
-$ sudo firewall-cmd --reload
-```
-
-After step 7 the Prisma schema is applied automatically by the backend on
-its first start (`npx prisma migrate deploy`).
+5. **The web container `depends_on: backend`** so Compose starts the
+   backend first. `depends_on` only waits for container start, not
+   application readiness — see "Health and readiness" below.
 
 ## Container lifecycle
 
@@ -168,59 +78,67 @@ its first start (`npx prisma migrate deploy`).
                     v
    +------------------------------------------------------+
    |  Start backend container                             |
-   |    - mount ./app, ./uploads                          |
+   |    - mount ./app, ./data, ./uploads                  |
    |    - run npm install                                 |
-   |    - run npx prisma migrate deploy                   |
-   |       (connects to PostgreSQL on the host)           |
    |    - run npm start  ->  node server.js               |
    |    - server binds 0.0.0.0:3000 inside container      |
    +------------------------------------------------------+
                     |
                     v
    +------------------------------------------------------+
-   |  Start web container (TLS termination, port 443)     |
+   |  Start web container                                 |
+   |    - mount frontend/dist, public/, nginx config      |
+   |    - nginx binds 0.0.0.0:80                          |
+   |    - Docker publishes host :8080  ->  container :80  |
    +------------------------------------------------------+
                     |
                     v
                 READY
 ```
 
+## Networking inside Compose
+
+```
+   intranet_nginx               intranet_backend
+   (service: web)               (service: backend)
+       |  proxy_pass                  ^
+       |   http://backend:3000/  -----+
+       |
+       v
+   host 0.0.0.0:8080  (exposed, HTTP)
+```
+
+The backend's port `3000` is **not** published to the host. It is reachable
+only from `web` (nginx).
+
 ## Environment & secrets
 
-Secrets live in `/srv/intranet/.env` on the VM:
+One secret today: `SESSION_SECRET` in `/srv/intranet/.env`:
 
 ```
-SESSION_SECRET=<48-byte hex string>
-DATABASE_URL=postgresql://intranet_app:<password>@host.docker.internal:5432/intranet_hci?schema=public&sslmode=disable
-INITIAL_ADMIN_PASSWORD=<set once for first-boot seeding, then rotated via UI>
+SESSION_SECRET=<hex string>
 ```
 
-Note that `sslmode=disable` is acceptable here because the connection never
-leaves the VM — the Docker bridge interface is internal to the host kernel.
-For DBA workstations connecting from elsewhere on the network, configure
-client-side TLS or `sslmode=require` depending on hospital policy.
+Compose reads `.env` automatically and substitutes `${SESSION_SECRET}` into
+the backend's environment.
 
-The backend **refuses to start** if `SESSION_SECRET` or `DATABASE_URL` is
-empty.
+The backend **refuses to start** if `SESSION_SECRET` is empty. Startup log:
+```
+FATAL: SESSION_SECRET environment variable is not set. Refusing to start.
+```
 
-To rotate the session secret (invalidates all active sessions):
+To rotate (invalidates all sessions):
 ```bash
-$ openssl rand -hex 48                                     # generate new value
-$ sudo nano /srv/intranet/.env                             # paste in
-$ docker compose restart backend                           # apply
-```
-
-To rotate the application user's database password:
-```bash
-$ sudo -u postgres psql -c "ALTER USER intranet_app WITH PASSWORD '<new>';"
-$ sudo nano /srv/intranet/.env       # update DATABASE_URL with new password
-$ docker compose restart backend
+$ openssl rand -hex 48                                # generate new
+$ sudo nano /srv/intranet/.env                        # paste in
+$ docker compose restart backend                      # apply
 ```
 
 ## Day-to-day operations cheatsheet
 
+Run from `/srv/intranet/`:
+
 ```bash
-# Application containers
 $ docker compose ps                  # show container state
 $ docker compose up -d               # start (idempotent)
 $ docker compose down                # stop and remove containers
@@ -228,56 +146,54 @@ $ docker compose restart             # restart both
 $ docker compose restart backend     # just the backend
 $ docker compose restart web         # just nginx
 $ docker compose logs -f backend     # tail backend logs
-
-# PostgreSQL (native, not in a container)
-$ sudo systemctl status postgresql        # health
-$ sudo systemctl restart postgresql       # restart database
-$ sudo -u postgres psql intranet_hci      # local shell as DB owner
-$ sudo journalctl -u postgresql -n 100    # PostgreSQL logs
+$ docker compose logs -f web         # tail nginx logs
+$ docker compose logs --tail=100     # last 100 lines of each
+$ docker compose exec backend sh     # shell into backend container
+$ docker compose exec web sh         # shell into nginx container
+$ docker compose pull                # fetch newer image tags
 ```
 
-## Database migrations (Prisma)
+**Tip:** `docker compose` is *declarative* and *idempotent*. Running
+`docker compose up -d` against an already-running stack is a no-op.
 
-Schema changes are managed in version control as Prisma migrations under
-`/srv/intranet/app/prisma/migrations/`. The deployment flow:
+## What "restart" actually does
 
 ```
-   1. Developer edits  app/prisma/schema.prisma
+   docker compose restart backend
        |
-       v
-   2. Locally: npx prisma migrate dev --name <change>
-       (creates a new SQL migration file under migrations/)
+       +- send SIGTERM to the running container
+       |    (10-second grace, then SIGKILL)
        |
-       v
-   3. Commit  schema.prisma + the new migrations folder
+       +- start a new container from the same image
        |
-       v
-   4. Code review + change-management approval
+       +- re-mount the volumes
        |
-       v
-   5. On production:
-        cd /srv/intranet && docker compose restart backend
-      (which runs `prisma migrate deploy` on startup)
+       +- run the start command:
+              sh -c "npm install && npm start"
+              -- re-runs every restart, ~10-20 seconds
 ```
 
-Manual schema changes via `psql` **bypass this flow and will create drift.**
-DBAs should treat the schema as code-owned.
+The backend takes ≈15–30 seconds to be ready after a restart because of
+`npm install`.
 
 ## Building the frontend
 
+The React app is **built ahead of time** and the artifacts in
+`frontend/dist/` are what nginx serves. **No hot-reload in the deployed
+stack.** After editing anything under `frontend/src/`:
+
 ```bash
 $ cd /srv/intranet/frontend
-$ npm run build           # produces fresh dist/
-$ npm run lint            # ESLint
+$ npm run build           # produces fresh dist/  (10-30 s)
+$ npm run lint            # optional, runs ESLint
 ```
 
-If you forget to rebuild after a frontend edit, the website continues to
-serve the old UI — the most common source of "I deployed but I don't see
-my change."
+⚠️ If you forget to rebuild, the website continues serving the old UI —
+this is the #1 confusing symptom for new contributors.
 
 ## Editing the admin or manager portals
 
-Plain HTML/JS files:
+Plain HTML/JS files at:
 
 ```
    /srv/intranet/public/admin/dashboard.html
@@ -285,35 +201,96 @@ Plain HTML/JS files:
    /srv/intranet/public/manager/index.html
 ```
 
-Edits are **immediately live** on the next page load; no container restart
-is needed.
+Edits are **immediately live** on the next page load.
 
 ## Health and readiness
 
-The backend exposes `GET /api/health`:
+No formal healthchecks in `docker-compose.yml`. The `GET /api/health`
+endpoint exists for manual probing:
+
 ```bash
-$ curl -sk https://Intranet-HCI.heart.local/api/health
-{"ok":true,"db":"connected"}
+$ curl -i http://localhost:8080/api/health
+HTTP/1.1 200 OK
+…
+{"ok":true}
 ```
 
 ## Cleanup recipes
 
 ```bash
-# Stop containers (database untouched)
-$ docker compose down
-
-# Remove orphaned images / build cache
-$ docker system prune -f
-
-# Trim journald
-$ sudo journalctl --vacuum-time=14d
-
-# PostgreSQL maintenance
-$ sudo -u postgres vacuumdb --all --analyze
-$ sudo -u postgres reindexdb intranet_hci
+$ docker compose down                # stop, keep data
+$ docker system prune -f             # remove unused images / cache
+$ sudo journalctl --vacuum-time=14d  # trim system logs
+$ docker system df                   # Docker's disk footprint
 ```
+
+---
+
+## 🔄 Production migration
+
+The deployment topology adds PostgreSQL and switches from HTTP:8080 to
+HTTPS:443. The Compose file gains an `extra_hosts` entry so the backend
+can reach the host's PostgreSQL through `host.docker.internal`.
+
+### Compose changes
+
+```yaml
+# New ports section on the web service
+ports:
+  - "443:443"          # was "8080:80"
+volumes:
+  - ./nginx/tls:/etc/nginx/tls:ro    # NEW — mounts the TLS cert/key
+
+# Backend changes
+backend:
+  extra_hosts:
+    - "host.docker.internal:host-gateway"   # NEW — lets backend reach host
+  environment:
+    - DATABASE_URL=${DATABASE_URL}           # NEW — Postgres connection
+    - INITIAL_ADMIN_PASSWORD=${INITIAL_ADMIN_PASSWORD}   # NEW
+  command: sh -c "npm install && npx prisma migrate deploy && npm start"
+```
+
+### One-time PostgreSQL setup on the production VM
+
+```bash
+$ sudo dnf install -y postgresql-server postgresql-contrib
+$ sudo /usr/bin/postgresql-setup --initdb
+$ sudo systemctl enable --now postgresql
+# Configure listen_addresses and pg_hba.conf, then:
+$ sudo systemctl reload postgresql
+$ sudo -u postgres psql <<'SQL'
+CREATE USER intranet_app WITH PASSWORD '...';
+CREATE USER intranet_ro  WITH PASSWORD '...';
+CREATE ROLE dba_group;
+CREATE DATABASE intranet_hci OWNER intranet_app;
+SQL
+$ sudo firewall-cmd --permanent --add-port=5432/tcp
+$ sudo firewall-cmd --reload
+```
+
+### Updated `.env`
+
+```
+SESSION_SECRET=<48-byte hex>
+DATABASE_URL=postgresql://intranet_app:<pw>@host.docker.internal:5432/intranet_hci?schema=public
+INITIAL_ADMIN_PASSWORD=<seeds admin on first boot>
+```
+
+### Updated nginx config (TLS termination)
+
+The container nginx config grows a `listen 443 ssl;` server block with
+`ssl_certificate` and `ssl_certificate_key` pointing at the bind-mounted
+cert from `/srv/intranet/nginx/tls/`.
+
+### Data migration
+
+A one-time script (`scripts/migrate-sqlite-to-pg.js` to be written as part
+of the Fastify branch) reads from `intranet.db` and writes to PostgreSQL
+via Prisma. Run once on cutover day, after stopping the Express backend
+and before starting the Fastify backend.
 
 ## Where to go next
 
-- [`05-remote-access.md`](05-remote-access.md) — getting into the box and the DB
+- [`05-remote-access.md`](05-remote-access.md) — getting into the box
 - [`06-maintenance.md`](06-maintenance.md) — routine care

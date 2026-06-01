@@ -12,62 +12,45 @@ medical practice. It provides employees with:
 - Recognition programs (Employee Spotlight nominations)
 - Centralized links to web applications used by the practice
 
-In production it is deployed as a single Red Hat Enterprise Linux 10 virtual
-machine running on **Huntsville Hospital's VMware vSphere** infrastructure,
-reached over the hospital's internal corporate network at the HTTPS endpoint
-**`https://Intranet-HCI.heart.local`**.
+## Current deployment (homelab)
 
-## High-level architecture
-
-The entire platform runs on a single VM. The Fastify application runs inside
-Docker; PostgreSQL runs natively on the host so DBAs can reach it directly
-without any container access.
+The system today runs in a **homelab test environment** as a single Red Hat
+Enterprise Linux 10 virtual machine on a Proxmox hypervisor. Remote access
+is via Tailscale or the local LAN. The site is reached at
+**`http://<vm-ip>:8080/`** over plain HTTP.
 
 ```
                                   +-------------------------------------------+
-                                  |  RHEL 10 VM   (vSphere guest, ESXi)       |
-                                  |  hostname: Intranet-HCI                   |
+                                  |  RHEL 10 VM   (Proxmox guest, KVM)        |
+                                  |  4 vCPU  ·  7 GiB RAM  ·  28 GiB disk     |
                                   |                                           |
-   +--------------------+   HTTPS |   +------------------------------------+  |
-   |  Hospital staff    |  ------>|   |  firewalld (public zone)           |  |
-   |  workstations on   |   :443  |   |  ingress: 22, 443, 5432*, 9090     |  |
-   |  internal corp net |         |   |  *5432 restricted to DBA group     |  |
+   +--------------------+   HTTP  |   +------------------------------------+  |
+   |  Workstation       |  ------>|   |  firewalld (public zone)           |  |
+   |  on LAN            |  :8080  |   |  ingress: 22, 8080, 3389, 9090     |  |
    +--------------------+         |   +-----------------+------------------+  |
                                   |                     |                     |
-   +--------------------+   SSH   |                     v                     |
-   |  IT Operations     |  ------>|   +------------------------------------+  |
-   |  jump host         |         |   |  nginx (TLS termination)           |  |
-   |                    |  Cockpit|   |  serves SPA, proxies /api -> :3000 |  |
-   +--------------------+   :9090 |   +-----------------+------------------+  |
-                                  |                     |                     |
-   +--------------------+         |   +-----------------v------------------+  |
-   |  Database          |  TCP    |   |  Docker bridge network             |  |
-   |  Administrators    |  5432   |   |   intranet_default (172.18.0.0/16) |  |
-   |  (DBeaver, pgAdmin)|  ------>|   |                                    |  |
-   +--------------------+         |   |   +-------------+ +-------------+  |  |
+   +--------------------+ Tailscale                     v                     |
+   |  Admin Mac /       |  -----> |   +------------------------------------+  |
+   |  remote device     |  :8080  |   |  Docker bridge network             |  |
+   +--------------------+   :22   |   |                                    |  |
+                                  |   |   +-------------+ +-------------+  |  |
                                   |   |   | intranet_   | | intranet_   |  |  |
                                   |   |   |  nginx      |->  backend    |  |  |
-                                  |   |   | nginx:alpine| | Fastify     |  |  |
-                                  |   |   +-------------+ | Prisma      |  |  |
+                                  |   |   | :80         | | Express 4   |  |  |
+                                  |   |   | host :8080  | | Node 20     |  |  |
+                                  |   |   +-------------+ | :3000       |  |  |
                                   |   |                   +------+------+  |  |
                                   |   +--------------------------+---------+  |
-                                  |                              | UNIX/TCP   |
-                                  |                              v            |
-                                  |   +------------------------------------+  |
-                                  |   |  PostgreSQL 16  (systemd service,  |  |
-                                  |   |    NOT a container)                |  |
-                                  |   |  /var/lib/pgsql/data               |  |
-                                  |   |  listens on 0.0.0.0:5432           |  |
-                                  |   |  - intranet_app  (app user)        |  |
-                                  |   |  - intranet_ro   (read-only)       |  |
-                                  |   |  - <dba accounts>                  |  |
+                                  |                              |            |
+                                  |   +--------------------------v---------+  |
+                                  |   |  Host bind mount                   |  |
+                                  |   |  /srv/intranet/data/intranet.db    |  |
+                                  |   |  (SQLite, file-based)              |  |
                                   |   +------------------------------------+  |
                                   +-------------------------------------------+
 ```
 
-## Service layers
-
-The production system is organized in **five concentric layers**:
+## Service layers (current)
 
 ```
    +--------------------------------------------------------------+
@@ -75,92 +58,82 @@ The production system is organized in **five concentric layers**:
    |  React 19 SPA  *  Admin HTML portal  *  Manager HTML portal  |
    +--------------------------------------------------------------+
    |                  (4)  APPLICATION                            |
-   |  Fastify backend (Node.js 20)  *  @fastify/session  *  Prisma|
-   |  REST API  *  4 role tiers  *  audit logging                 |
+   |  Express 4 backend (Node.js 20)  *  express-session          |
+   |  better-sqlite3  *  4 role tiers  *  audit logging           |
    +--------------------------------------------------------------+
    |                  (3)  DATA                                   |
-   |  PostgreSQL 16 (native systemd service, queryable externally)|
-   |  Session store inside same Postgres database                 |
-   |  Uploaded files on bind-mounted host filesystem (/uploads)   |
+   |  SQLite databases (intranet.db, sessions.db)                 |
+   |  Bind-mounted from host /srv/intranet/data/                  |
+   |  Uploaded files in /srv/intranet/uploads/                    |
    +--------------------------------------------------------------+
    |                  (2)  PLATFORM                               |
-   |  nginx reverse proxy (TLS)  *  Docker  *  bind-mount volumes |
+   |  nginx reverse proxy (HTTP)  *  Docker  *  bind-mount volumes|
    +--------------------------------------------------------------+
    |                  (1)  INFRASTRUCTURE                         |
-   |  RHEL 10  *  VMware vSphere  *  firewalld  *  Cockpit        |
+   |  RHEL 10  *  Proxmox VE  *  firewalld  *  Tailscale  *  GDM  |
    +--------------------------------------------------------------+
 ```
 
-## Why the database runs on the host instead of in a container
-
-**Direct external access for DBAs.** PostgreSQL listening on the host's
-network interface means database administrators connect from their normal
-workstation tools (psql, DBeaver, pgAdmin) without any `docker exec` or
-container-specific knowledge.
-
-**Independent lifecycle.** The database starts at boot via systemd before
-Docker comes up. Container rebuilds, image updates, or `docker compose down`
-operations do not touch the database.
-
-**Standard hospital backup integration.** Backup agents and monitoring
-that the hospital already operates against PostgreSQL clusters work
-unchanged against this instance.
-
-**Simpler disaster recovery.** Restoring PostgreSQL from a `pg_dump` or
-file-system snapshot does not require any container orchestration.
-
-## Audiences served
+## Audiences served (current)
 
 | Audience | How they reach the system | Where they land |
 |---|---|---|
-| Hospital staff (any device, internal network) | Browser to `https://Intranet-HCI.heart.local/` | React SPA (employee view) |
-| Managers | Browser to `https://Intranet-HCI.heart.local/manager/` | Static manager portal |
-| Admins / Super-admins | Browser to `https://Intranet-HCI.heart.local/admin/` | Static admin portal |
-| Technical operators | SSH from the IT-Ops jump host | Linux shell |
-| System maintenance | HTTPS to `https://Intranet-HCI.heart.local:9090/` | Cockpit web console |
-| Database administrators | psql / DBeaver / pgAdmin to `Intranet-HCI.heart.local:5432` | Direct SQL access |
+| Employees on LAN | `http://<lan-ip>:8080/` | React SPA (employee view) |
+| Managers | `http://<lan-ip>:8080/manager/` | Static manager portal |
+| Admins / Super-admins | `http://<lan-ip>:8080/admin/` | Static admin portal |
+| Remote operator (over Tailscale) | SSH or RDP to `<tailscale-ip>` | Linux shell or GNOME desktop |
+| System maintenance | `https://<vm-ip>:9090/` | Cockpit web console |
 
 ## Data-flow at a glance
 
 A typical "employee views the home page" request:
 
 ```
-   Browser              nginx                 Fastify backend           PostgreSQL
-     |                   |                          |                       |
-     |  GET /            |                          |                       |
-     |------------------>| serves dist/index.html   |                       |
-     |<------------------|                          |                       |
-     |                   |                          |                       |
-     |  GET /api/posts   |                          |                       |
-     |------------------>|  proxy_pass strips /api  |                       |
-     |                   |  ---- GET /posts ------->|                       |
-     |                   |                          |  Prisma -> SQL via    |
-     |                   |                          |  docker bridge gw     |
-     |                   |                          |  172.18.0.1:5432      |
-     |                   |                          |---------------------->|
-     |                   |                          |<----------------------|
-     |                   |  <---- 200 JSON ---------|                       |
-     |<------------------|                          |                       |
+   Browser              nginx                 Express backend           SQLite
+     |                   |                          |                      |
+     |  GET /            |                          |                      |
+     |------------------>| serves dist/index.html   |                      |
+     |<------------------|                          |                      |
+     |                   |                          |                      |
+     |  GET /api/posts   |                          |                      |
+     |------------------>|  proxy_pass strips /api  |                      |
+     |                   |  ---- GET /posts ------->|                      |
+     |                   |                          |  SELECT ... WHERE    |
+     |                   |                          |  status='approved'   |
+     |                   |                          |  (better-sqlite3,    |
+     |                   |                          |   synchronous)       |
+     |                   |                          |--------------------->|
+     |                   |                          |<---------------------|
+     |                   |  <---- 200 JSON ---------|                      |
+     |<------------------|                          |                      |
 ```
 
-## Where this lives in production
+---
 
-```
-   Huntsville Hospital vSphere Cluster
-                 |
-                 +- ESXi host(s)
-                       |
-                       +- VM: Intranet-HCI  (single production VM)
-                             +- vCPU:  4
-                             +- vRAM:  8 GiB
-                             +- vDisk: 80 GiB (OS + uploads + database)
-                             +- vNIC:  corporate VLAN
-                             +- DNS:   Intranet-HCI.heart.local
-                             +- Services:
-                                 - Docker  (nginx + Fastify containers)
-                                 - PostgreSQL 16 (systemd, on host)
-                                 - sshd, cockpit, chronyd, firewalld
-```
+## 🔄 Production migration
+
+When this system moves from the homelab to the Huntsville Hospital production
+environment, the following components change. The application code, frontend,
+nginx configuration topology, and overall architecture stay the same; only the
+specific implementations of each layer change.
+
+| Layer | Homelab (today) | Production target |
+|---|---|---|
+| Hypervisor | Proxmox VE (KVM) | VMware vSphere / ESXi (Huntsville cluster) |
+| Network access | Tailscale + LAN | Corporate network only |
+| Web entrypoint | `http://<ip>:8080` | `https://Intranet-HCI.heart.local` |
+| TLS | None (plain HTTP) | Internal-CA-issued cert in nginx, port 443 |
+| Backend framework | Express 4 (`server.js`) | Fastify (modular `src/`) |
+| Backend dependencies | `express`, `express-session`, `better-sqlite3` | `fastify`, `@fastify/session`, `@prisma/client` |
+| Database | SQLite (file in `data/`) | PostgreSQL 16 (native systemd service on host) |
+| Schema management | Inline `db.exec()` in `server.js` | Prisma migrations under `prisma/migrations/` |
+| Session store | SQLite via `connect-sqlite3` | PostgreSQL via `@fastify/session` |
+| DBA query path | `docker exec` + `sqlite3` | `psql` / DBeaver / pgAdmin to host:5432 |
+| Remote admin GUI | RDP + Cockpit | Cockpit only |
+
+The migration plan tracks these changes in [`08-disaster-recovery.md`](08-disaster-recovery.md)
+under the "Migration plan" section. Until the migration is complete, this
+documentation describes both states.
 
 Continue to [`02-infrastructure.md`](02-infrastructure.md) for the server-side
-details, or jump to [`06-maintenance.md`](06-maintenance.md) for operations.
+details.
