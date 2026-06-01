@@ -43,16 +43,16 @@ The admin (`public/admin/`) and manager (`public/manager/`) portals are hand-wri
 browser → nginx:80 (host :8080) ─┬─ /            → frontend/dist/ (React SPA, fallback to index.html)
                                  ├─ /admin/      → public/admin/   (static admin portal)
                                  ├─ /manager/    → public/manager/ (static manager portal)
-                                 └─ /api/*       → backend:3000/*  (Express, /api prefix stripped)
+                                 └─ /api/*       → backend:3000/*  (Fastify, /api prefix stripped)
 ```
 
 Because nginx strips `/api`, routes in `server.js` are defined **without** the `/api` prefix (e.g. `app.get("/posts")` is reached as `/api/posts` from the browser). Keep this in mind when adding endpoints.
 
-### Backend (`app/server.js`, single file, ~1244 lines)
+### Backend (`app/src/`, Fastify modular routes)
 
-- **Express + better-sqlite3 + express-session** (SQLite-backed via `connect-sqlite3`). DB lives at `/data/intranet.db`, sessions at `/data/sessions.db` — both on the `./data` volume.
+- **Fastify + Prisma + @fastify/session**. The PostgreSQL database lives on the host (not in a container) at `/var/lib/pgsql/data`. The backend connects via `host.docker.internal:5432`.
 - **`app.set("trust proxy", 1)`** is required because nginx is in front; don't remove it.
-- All tables are created inline at boot via `db.exec(...)` — schema lives in `server.js` itself, not migrations. Adding a column means editing the `CREATE TABLE` block AND writing an `ALTER TABLE IF NOT EXISTS`-style guard if the table may already exist in production.
+- Schema lives in `app/prisma/schema.prisma`. Migrations under `app/prisma/migrations/` are applied automatically on backend startup via `prisma migrate deploy`. Never write manual SQL DDL; use Prisma migrations.
 - **Auth model** — four middleware tiers, all session-based:
   - `requireLogin` — any authenticated user
   - `requireAdmin` — `manager`, `admin`, or `superadmin` (named "admin" but the **broadest** non-public tier)
@@ -75,15 +75,15 @@ Because nginx strips `/api`, routes in `server.js` are defined **without** the `
 
 These are intentionally **not** part of the React app — plain HTML + vanilla JS that call the same `/api/*` endpoints. Keep them dependency-free. They're mounted into nginx read-only at `/admin/` and `/manager/`.
 
-## Database tables (defined in `server.js` lines 85–230)
+## Database tables (defined in `app/prisma/schema.prisma`)
 
 `users`, `posts`, `resources`, `schedules`, `spotlight`, `directory`, `audit_log`, `site_settings`, `signup_sheets`, `signup_entries`, `it_tickets`, `spotlight_nominations`.
 
 To inspect prod data:
 
 ```bash
-docker-compose exec backend sh -c "sqlite3 /data/intranet.db '.tables'"
-docker-compose exec backend sh -c "sqlite3 /data/intranet.db 'SELECT * FROM users'"
+sudo -u postgres psql intranet_hci -c "\dt"
+sudo -u postgres psql intranet_hci -c "SELECT id, username, role FROM \"User\";"
 ```
 
 ## Things to watch out for

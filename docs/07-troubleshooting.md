@@ -31,7 +31,6 @@ broken, find the matching symptom and follow the steps.
 - [Containers keep restarting](#containers-keep-restarting)
 - [The database is locked](#the-database-is-locked)
 - [I forgot the admin password](#i-forgot-the-admin-password)
-- [Tailscale is offline](#tailscale-is-offline)
 - [SELinux is blocking something](#selinux-is-blocking-something)
 - [GPG check failed during dnf upgrade](#gpg-check-failed-during-dnf-upgrade)
 
@@ -39,16 +38,16 @@ broken, find the matching symptom and follow the steps.
 
 ## Website is completely down
 
-**Symptom:** Browser cannot reach `http://<LAN_IP>:8080/`. Connection
+**Symptom:** Browser cannot reach `https://Intranet-HCI.heart.local/`. Connection
 refused, or times out.
 
 **Triage:**
 ```bash
-$ ssh bryant@<TAILSCALE_IP>         # can you log in?
-$ ping <LAN_IP>                # is the VM on the network?
+$ ssh bryant@Intranet-HCI.heart.local         # can you log in?
+$ ping <vsphere-assigned-ip>                # is the VM on the network?
 ```
 
-If you cannot ping or SSH, the VM is down or off the network. Check Proxmox.
+If you cannot ping or SSH, the VM is down or off the network. Check vSphere.
 
 If you can SSH, continue:
 
@@ -143,7 +142,7 @@ $ cat /srv/intranet/.env       # confirm a value exists
 
 2. **Wrong password (it happens).** Reset it — see [I forgot the admin password](#i-forgot-the-admin-password).
 
-3. **Backend can't write to sessions.db.** Check disk space and permissions:
+3. **Backend can't write to session table.** Check disk space and permissions:
    ```bash
    $ df -h /srv
    $ ls -la /srv/intranet/data/
@@ -226,7 +225,7 @@ See [`05-remote-access.md`](05-remote-access.md) → *Recommended client*.
 
 **Most likely:** sshd is not running.
 
-From the Proxmox console (or any working remote path):
+From the vSphere console (or any working remote path):
 ```bash
 $ sudo systemctl status sshd
 $ sudo systemctl start sshd
@@ -235,7 +234,7 @@ $ sudo systemctl enable sshd
 
 **If you only have an SSH problem from outside the LAN:**
 
-- Check Tailscale: `sudo systemctl status tailscaled`
+- Check the corporate network: `sudo systemctl status (none)`
 - Check firewall: `sudo firewall-cmd --list-ports` should include `22/tcp` (or
   via `services: ssh`)
 
@@ -294,7 +293,7 @@ $ docker compose logs --tail=200 <service>
 
 Look for the very first error after each restart. Most likely:
 
-- **Backend:** `SESSION_SECRET` missing or `intranet.db` corrupted
+- **Backend:** `SESSION_SECRET` missing or PostgreSQL unreachable
 - **Backend:** a recent code change has a syntax error
 - **nginx:** `host not found in upstream "backend"` → backend isn't running
 - **nginx:** typo in `/srv/intranet/nginx/default.conf` → test with
@@ -302,25 +301,33 @@ Look for the very first error after each restart. Most likely:
 
 ---
 
-## The database is locked
+## Database errors in the backend logs
 
-**Symptom:** Backend logs show `SQLITE_BUSY: database is locked`.
+**Symptom:** Backend logs show PostgreSQL connection errors:
+`P1001: Can't reach database server`, `P2024: Timed out fetching a connection from the pool`,
+or sustained pool-exhaustion warnings.
 
-**Cause:** Something else has the database open (often a manual `sqlite3`
-session left open in a forgotten terminal).
-
-**Fix:**
+**Triage:**
 ```bash
-$ docker compose exec backend sh
-/app # ps -ef | grep sqlite
-# kill any stray sqlite3 processes
-/app # exit
-$ docker compose restart backend
+$ sudo systemctl status postgresql                # database service up?
+$ ss -tlnp | grep 5432                            # listening?
+$ docker compose exec backend sh -c \
+    "nc -zv host.docker.internal 5432"            # reachable from container?
+$ sudo journalctl -u postgresql -n 50             # postgres log tail
 ```
 
-If the lock persists across restart, the SQLite **WAL journal** may be
-corrupted. Restore from the most recent backup (see
-[`08-disaster-recovery.md`](08-disaster-recovery.md)).
+**Common causes and fixes:**
+
+- **PostgreSQL crashed or didn't start** —
+  `sudo systemctl restart postgresql`
+- **Connection limit reached** — check active connections:
+  `sudo -u postgres psql -c "SELECT count(*) FROM pg_stat_activity;"`.
+  If near `max_connections`, restart the backend to release pooled
+  connections, then consider raising the limit in `postgresql.conf`.
+- **Wrong password in `.env`** — `DATABASE_URL` mismatch with what
+  PostgreSQL expects. Compare to the role's actual password.
+- **`pg_hba.conf` rejecting the connection** — the postgres journal
+  will say "no pg_hba.conf entry" or "password authentication failed".
 
 ---
 
@@ -328,7 +335,7 @@ corrupted. Restore from the most recent backup (see
 
 **The Linux admin password** (the `bryant` account):
 
-1. From the Proxmox noVNC console (you'll need physical or hypervisor access),
+1. From the vSphere Web Console (vCenter) console (you'll need physical or hypervisor access),
    reboot the VM
 2. At the GRUB menu, press `e` to edit the boot entry
 3. Find the line starting with `linux …`, add `rd.break enforcing=0` to the end
@@ -347,26 +354,6 @@ See [`06-maintenance.md`](06-maintenance.md) → *Changing the intranet admin pa
 
 ---
 
-## Tailscale is offline
-
-**Symptom:** The VM doesn't appear in the Tailscale admin console, or
-`tailscale status` shows nothing.
-
-**Fix:**
-```bash
-$ sudo systemctl restart tailscaled
-$ sudo tailscale status                    # shows current state
-$ sudo tailscale up                        # re-authenticates if needed
-                                           # will print a login URL — open it
-                                           # in a browser, log in as the
-                                           # tailnet owner
-```
-
-If `tailscale up` fails with "logged out":
-```bash
-$ sudo tailscale up --auth-key=tskey-xxxxx
-```
-(generate the auth key in the Tailscale admin console → Settings → Keys)
 
 ---
 

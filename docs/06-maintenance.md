@@ -5,7 +5,7 @@
 > code blocks; the prose is for newcomers.
 
 If you remember nothing else: **most problems are solved by restarting the right
-service.** Identify which layer is broken (web, backend, RDP, OS), then restart
+service.** Identify which layer is broken (web, backend, database, OS), then restart
 just that piece.
 
 ---
@@ -162,7 +162,7 @@ intranet_backend  | [email stub] subject → recipient
 
 What "bad" looks like:
 ```
-intranet_backend  | Error: SQLITE_BUSY: database is locked
+intranet_backend  | Error: P1001 Can't reach database server at host.docker.internal:5432
 intranet_backend  | UnhandledPromiseRejection ...
 ```
 
@@ -176,7 +176,6 @@ $ sudo journalctl --since "1 hour ago"   # past hour
 $ sudo journalctl --since today          # since midnight
 $ sudo journalctl -u docker.service      # logs for a specific service
 $ sudo journalctl -u sshd                # SSH logs
-$ sudo journalctl -u gnome-remote-desktop  # RDP server logs
 $ sudo journalctl -k                     # kernel messages only
 $ sudo journalctl -f                     # live tail of everything
 ```
@@ -233,45 +232,61 @@ human-readable changelog, and it warns you when a reboot is required.
 
 ### What needs backing up
 
-Three things, in priority order:
+Four things, in priority order:
 
 | Importance | Path | Why |
 |---|---|---|
-| 🔴 Critical | `/srv/intranet/data/` | The live SQLite databases |
+| 🔴 Critical | PostgreSQL `intranet_hci` database | Source of truth for all relational data |
 | 🔴 Critical | `/srv/intranet/uploads/` | All uploaded photos/files |
-| 🟡 Important | `/srv/intranet/.env` | `SESSION_SECRET` (without it, all sessions invalidate) |
-| 🟢 Nice | `/srv/intranet/app/`, `/srv/intranet/frontend/` | Source code (also in git, ideally) |
+| 🟡 Important | `/srv/intranet/.env` | `SESSION_SECRET` and `DATABASE_URL` |
+| 🟡 Important | `/var/lib/pgsql/data/postgresql.conf` and `pg_hba.conf` | DB configs needed to rebuild |
+| 🟢 Nice | `/srv/intranet/app/`, `/srv/intranet/frontend/` | Source code (also in git) |
 
 ### Manual backup recipe
 
 ```bash
 $ DATE=$(date +%Y%m%d-%H%M%S)
-$ sudo tar -czf /home/bryant/intranet-backup-$DATE.tar.gz \
-      -C /srv intranet/data intranet/uploads intranet/.env
-$ ls -lh /home/bryant/intranet-backup-*.tar.gz
+
+# 1. Dump the PostgreSQL database (safe to run live; uses MVCC snapshot)
+$ sudo -u postgres pg_dump -Fc intranet_hci \
+    > /home/<ops-user>/intranet-db-$DATE.dump
+
+# 2. Tar the uploads
+$ sudo tar -czf /home/<ops-user>/intranet-uploads-$DATE.tar.gz \
+    -C /srv intranet/uploads
+
+# 3. Copy the .env (small, but contains secrets)
+$ sudo cp /srv/intranet/.env /home/<ops-user>/intranet-env-$DATE.backup
 ```
 
-Then **copy it off the VM** (this is the part people forget):
+Then **copy the backups off the VM** (this is the part people forget):
 
 ```bash
-# From your Mac:
-$ scp bryant@<TAILSCALE_IP>:/home/bryant/intranet-backup-*.tar.gz ~/Backups/
+# From an operator workstation:
+$ scp <ops-user>@Intranet-HCI.heart.local:/home/<ops-user>/intranet-*-$DATE.* \
+      ~/Backups/intranet/
 ```
 
-### Hot vs cold backup
+### Why pg_dump is safe to run live
 
-⚠️ The SQLite database is being **actively written** by the backend. A `tar`
-of `intranet.db` could capture it mid-write and produce a slightly inconsistent
+`pg_dump` uses PostgreSQL's MVCC snapshot mechanism: it takes a consistent
+point-in-time view of all tables, and the backend can continue reading and
+writing concurrently. No need to stop the application for the dump.
+
+## Hot vs cold backup
+
+⚠️ The PostgreSQL database is being **actively written** by the backend. A `tar`
+of the `intranet_hci` database could capture it mid-write and produce a slightly inconsistent
 file. For a truly clean backup:
 
 ```bash
-$ docker compose exec backend sqlite3 /data/intranet.db ".backup '/data/intranet-backup.db'"
+$ sudo -u postgres pg_dump -Fc intranet_hci > /var/backups/intranet/intranet-db-$(date +%Y%m%d-%H%M%S).dump
 $ sudo tar -czf /home/bryant/intranet-backup-$DATE.tar.gz \
       -C /srv intranet/data/intranet-backup.db intranet/uploads intranet/.env
 $ sudo rm /srv/intranet/data/intranet-backup.db
 ```
 
-`.backup` is SQLite's online backup API — safe to run while the app is live.
+`.backup` is PostgreSQL's online backup API — safe to run while the app is live.
 
 ### Automated backups (recommended)
 
@@ -284,17 +299,21 @@ BACKUP_DIR=/var/backups/intranet
 DATE=$(date +%Y%m%d-%H%M%S)
 mkdir -p "$BACKUP_DIR"
 
-# Safe SQLite snapshot
-docker compose -f /srv/intranet/docker-compose.yml exec -T backend \
-    sqlite3 /data/intranet.db ".backup '/data/intranet-snapshot.db'"
+# PostgreSQL logical dump (compressed custom format)
+sudo -u postgres pg_dump -Fc intranet_hci \
+    > "$BACKUP_DIR/intranet-db-$DATE.dump"
 
-tar -czf "$BACKUP_DIR/intranet-$DATE.tar.gz" \
-    -C /srv intranet/data/intranet-snapshot.db intranet/uploads intranet/.env
+# Uploads
+tar -czf "$BACKUP_DIR/intranet-uploads-$DATE.tar.gz" \
+    -C /srv intranet/uploads
 
-rm /srv/intranet/data/intranet-snapshot.db
+# Symlink "LATEST" for convenience
+ln -sf "$BACKUP_DIR/intranet-db-$DATE.dump"          "$BACKUP_DIR/intranet-db-LATEST.dump"
+ln -sf "$BACKUP_DIR/intranet-uploads-$DATE.tar.gz"   "$BACKUP_DIR/intranet-uploads-LATEST.tar.gz"
 
-# Keep only the last 14 backups
-ls -1t "$BACKUP_DIR"/intranet-*.tar.gz | tail -n +15 | xargs -r rm --
+# Keep only the last 14 backups of each type
+ls -1t "$BACKUP_DIR"/intranet-db-*.dump      | tail -n +15 | xargs -r rm --
+ls -1t "$BACKUP_DIR"/intranet-uploads-*.tar.gz | tail -n +15 | xargs -r rm --
 ```
 
 Then schedule it nightly via cron:
@@ -305,11 +324,11 @@ $ sudo crontab -e
 0 2 * * * /usr/local/bin/intranet-backup.sh >> /var/log/intranet-backup.log 2>&1
 ```
 
-This runs at 2:00 a.m. every night, keeps two weeks of snapshots.
+This runs at 2:00 a.m. every night and keeps two weeks of snapshots.
 
-⚠️ **Still copy them off the box.** Backups stored only on the VM don't help if
-the VM is the thing that fails. Sync to a NAS, a USB drive on the Proxmox host,
-or a cloud bucket — at least weekly.
+⚠️ **Still copy them off the VM.** Backups stored only on the VM do not
+help if the VM is the thing that fails. Sync nightly to a hospital-managed
+backup share or cloud bucket.
 
 ---
 
@@ -369,39 +388,33 @@ $ sudo userdel -r alice                            # -r removes their home direc
 ```
 
 ⚠️ **Application users (admin accounts inside the intranet website) are
-different** — those live in the `users` table of `intranet.db` and are managed
+different** — those live in the `users` table of the `intranet_hci` database and are managed
 through the website's admin panel at `/admin/`, not via Linux.
 
 ---
 
 ## 9. Changing the intranet admin password
 
-If you forgot the admin password for the website (not Linux — the website
-admin):
+If you forgot the admin password for the website (not the Linux account —
+the website admin user inside the application):
 
 ```bash
-$ docker compose exec backend sh
-/app # sqlite3 /data/intranet.db
-sqlite> .mode column
-sqlite> SELECT id, username, role FROM users;
-sqlite> .quit
-/app # exit
-```
-
-Then write a small Node script to hash a new password and update the row,
-or temporarily install bcrypt CLI:
-
-```bash
+# 1. Generate a new bcrypt hash inside the backend container
 $ docker compose exec backend node -e \
-  "console.log(require('bcryptjs').hashSync('NewPass123!', 10))"
+    "console.log(require('bcryptjs').hashSync('NewPass123!', 10))"
 # Copy the resulting $2a$10$... string
-$ docker compose exec backend sqlite3 /data/intranet.db \
-  "UPDATE users SET password_hash='<paste-hash-here>' WHERE username='admin';"
+
+# 2. Update the user row in PostgreSQL
+$ sudo -u postgres psql intranet_hci -c \
+    "UPDATE \"User\" SET password_hash = '<paste-hash-here>' WHERE username = 'admin';"
 ```
 
-Done. Log in with the new password.
+Or, if you prefer GUI tools (DBeaver, pgAdmin), update the same row through
+your DBA workstation — connect to `Intranet-HCI.heart.local:5432` as a
+DBA-privileged user, navigate to the `User` table, edit the `password_hash`
+column.
 
----
+Log in with the new password.
 
 ## 10. SSL/TLS — should we do this?
 
@@ -435,7 +448,7 @@ A reasonable rhythm for this system:
    ├─ docker compose ps                  → containers all Up
    ├─ df -h /                            → disk under 80%
    ├─ sudo journalctl -p err --since=7d  → any errors?
-   └─ Check Tailscale admin console      → all expected devices online
+   └─ Check the corporate network admin console      → all expected devices online
 
    MONTHLY  (30 min, manual, maintenance window)
    ├─ sudo dnf upgrade --security        → security updates

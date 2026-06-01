@@ -11,7 +11,7 @@ pieces talk to one another, and how data flows through it.
    ├── .env                        (SESSION_SECRET — sensitive)
    │
    ├── app/                        ⮜  BACKEND
-   │   ├── server.js               (≈1,244 lines, monolithic Express app)
+   │   ├── server.js               (Fastify entrypoint + plugin registration)
    │   ├── package.json            (dependencies)
    │   └── node_modules/           (installed on container boot)
    │
@@ -40,8 +40,8 @@ pieces talk to one another, and how data flows through it.
    │   └── default.conf            (reverse-proxy rules)
    │
    ├── data/                       ⮜  PERSISTENT DATA
-   │   ├── intranet.db             (SQLite — primary database)
-   │   └── sessions.db             (SQLite — session store)
+   │   (NOTE: in production, PostgreSQL data lives at /var/lib/pgsql/data
+   │    on the host — NOT inside the project tree)
    │
    ├── uploads/                    ⮜  UPLOADED FILES (photos, resources)
    │
@@ -81,9 +81,9 @@ pieces talk to one another, and how data flows through it.
    │                  intranet_backend  (node:20-alpine)                   │
    │                                                                       │
    │   server.js                                                           │
-   │   ├─ Express app (port 3000)                                          │
-   │   ├─ express-session  (SQLite-backed via connect-sqlite3)             │
-   │   ├─ better-sqlite3   (DB driver, synchronous, fast)                  │
+   │   ├─ Fastify app (port 3000)                                          │
+   │   ├─ @fastify/session  (PostgreSQL-backed)                             │
+   │   ├─ Prisma Client (PostgreSQL)   (DB driver, synchronous, fast)                  │
    │   ├─ bcryptjs         (password hashing)                              │
    │   ├─ multer           (multipart file uploads → /uploads)             │
    │   ├─ express-rate-limit (login limiter: 20 / 15 min)                  │
@@ -93,7 +93,7 @@ pieces talk to one another, and how data flows through it.
                      ▼                                     ▼
    ┌──────────────────────────────┐      ┌──────────────────────────────┐
    │   /data/intranet.db          │      │   /uploads/                  │
-   │   (SQLite primary DB)        │      │   Photos, attached files     │
+   │   (PostgreSQL on host)       │      │   Photos, attached files     │
    │   /data/sessions.db          │      │   Served via /files/ route   │
    │   (Express session store)    │      │   express.static('/uploads') │
    └──────────────────────────────┘      └──────────────────────────────┘
@@ -106,11 +106,12 @@ this is one of the most common mistakes when adding new endpoints.
 
 ## Database schema
 
-The schema is defined in-line at the top of `server.js` via `db.exec()` and
-runs every time the backend starts. There are **no migration files**.
+The schema is defined in `prisma/schema.prisma`. Migrations under
+`prisma/migrations/` apply automatically on backend startup via
+`prisma migrate deploy`. Prisma migrations under `prisma/migrations/` apply automatically on startup.
 
 ```
-   intranet.db
+   intranet_hci  (PostgreSQL)
    ┌─ users                       (login accounts, roles)
    │     id, username, password_hash, role, created_at
    │
@@ -138,18 +139,21 @@ runs every time the backend starts. There are **no migration files**.
    │
    └─ it_tickets                  (IT support requests)
 
-   sessions.db                    ⮜  separate file managed by connect-sqlite3
-   └─ sessions                    (active Express sessions, opaque to app code)
+   Session                        ⮜  table managed by @fastify/session
+                                  (active Fastify sessions, opaque to app code)
 ```
 
 To inspect any table:
 ```bash
-$ docker exec -it intranet_backend sh
-/app # sqlite3 /data/intranet.db
-sqlite> .tables
-sqlite> .schema users
-sqlite> SELECT * FROM users;
-sqlite> .quit
+# From a DBA workstation (preferred):
+$ psql -h Intranet-HCI.heart.local -U <dba-user> -d intranet_hci
+intranet_hci=> \dt
+intranet_hci=> \d "User"
+intranet_hci=> SELECT id, username, role FROM "User";
+intranet_hci=> \q
+
+# Or directly on the VM as the postgres superuser:
+$ sudo -u postgres psql intranet_hci
 ```
 
 ## Roles and authorization
@@ -190,7 +194,7 @@ name does not match what the function does.
 ## Frontend (React SPA) — request lifecycle
 
 ```
-   1. Browser visits  http://<LAN_IP>:8080/
+   1. Browser visits  https://Intranet-HCI.heart.local/
    2. nginx returns  frontend/dist/index.html
    3. The HTML pulls /assets/index-xxxx.js  (the bundled React app)
    4. React renders <App />
@@ -305,7 +309,7 @@ Anything that should survive container restarts is bind-mounted from the host:
 | Host path | Container path | Persists | Why |
 |---|---|---|---|
 | `/srv/intranet/app/`       | `/app/`       | yes | source code (live-mounted for easy edits) |
-| `/srv/intranet/data/`      | `/data/`      | yes | SQLite databases |
+| (none — DB is on host)     | n/a           | yes | PostgreSQL data at `/var/lib/pgsql/data` (not mounted into any container) |
 | `/srv/intranet/uploads/`   | `/uploads/`   | yes | uploaded files |
 | `/srv/intranet/frontend/dist/` | `/usr/share/nginx/html/` | yes (R/O) | built SPA |
 | `/srv/intranet/public/admin/`  | `/admin/`  | yes (R/O) | static admin portal |

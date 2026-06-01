@@ -1,7 +1,7 @@
 # Heart Center Intranet — Technical Documentation
 
 > **Production deployment of the Heart Center employee intranet platform**
-> Document set version 1.0 · Generated 2026-05-20
+> Document set version 1.0
 
 This `docs/` directory is the canonical reference for the system. It is intended for
 two audiences:
@@ -16,9 +16,9 @@ If you are new to this system, read in order:
 |---|---|---|---|
 | 1 | [`01-overview.md`](01-overview.md) — Executive summary and architecture diagram | Everyone | 5 min |
 | 2 | [`02-infrastructure.md`](02-infrastructure.md) — Server, network, OS, services | Engineer / Ops | 15 min |
-| 3 | [`03-application.md`](03-application.md) — Intranet codebase, data model, request flow | Engineer | 20 min |
-| 4 | [`04-deployment.md`](04-deployment.md) — Docker Compose, configuration, secrets | Engineer / Ops | 10 min |
-| 5 | [`05-remote-access.md`](05-remote-access.md) — Tailscale, SSH, RDP, Cockpit | Engineer / Ops | 10 min |
+| 3 | [`03-application.md`](03-application.md) — Application codebase, data model, request flow | Engineer | 20 min |
+| 4 | [`04-deployment.md`](04-deployment.md) — Docker Compose, configuration, secrets, database | Engineer / Ops | 15 min |
+| 5 | [`05-remote-access.md`](05-remote-access.md) — SSH, Cockpit, direct DB access | Engineer / Ops | 10 min |
 | 6 | [`06-maintenance.md`](06-maintenance.md) — **Maintenance guide for Red Hat newcomers** | Ops | 30 min |
 | 7 | [`07-troubleshooting.md`](07-troubleshooting.md) — Known problems and fixes | Ops | reference |
 | 8 | [`08-disaster-recovery.md`](08-disaster-recovery.md) — Backups and restore procedure | Ops | 10 min |
@@ -31,27 +31,24 @@ If you are new to this system, read in order:
 | Property | Value |
 |---|---|
 | **Project** | Heart Center Intranet |
-| **Host OS** | Red Hat Enterprise Linux 10.1 (Coughlan) |
-| **Virtualization** | KVM (Proxmox VE on `<proxmox-hostname>`) |
-| **CPU / RAM / Disk** | 4 vCPU / 7 GiB / 28 GiB |
-| **Application stack** | nginx · Node.js / Express · SQLite · React 19 |
-| **Container runtime** | Docker 29.5.0 with Compose v5.1.3 |
-| **Public web URL (LAN)** | `http://<LAN_IP>:8080/` |
-| **Tailscale IP** | `<TAILSCALE_IP>` (`<vm-hostname>` on `<tailnet-owner>@` tailnet) |
+| **Production URL** | `https://Intranet-HCI.heart.local` |
+| **Host OS** | Red Hat Enterprise Linux 10.1 |
+| **Virtualization** | VMware vSphere (Huntsville Hospital cluster) |
+| **Production VM** | `Intranet-HCI` · 4 vCPU · 8 GiB · 80 GiB disk (single VM) |
+| **Database** | PostgreSQL 16 (native systemd service on the same VM) |
+| **Application stack** | nginx · Node.js / Fastify · PostgreSQL · Prisma · React 19 |
+| **Container runtime** | Docker with Compose |
 | **Code repository on host** | `/srv/intranet/` |
-| **Application data** | `/srv/intranet/data/intranet.db` (SQLite) |
 | **Uploaded files** | `/srv/intranet/uploads/` |
 
 ---
 
 ## Conventions used in this documentation
 
-- Commands prefixed with `$` are run as your **regular user** (`bryant`).
+- Commands prefixed with `$` are run as your **regular user**.
 - Commands prefixed with `#` require **root** — prefix them with `sudo`.
 - File paths are **absolute**.
 - Diagrams use ASCII art so they render in any terminal or editor.
-- "⚠️" calls out actions that can cause downtime if done wrong.
-- "💡" marks shortcuts and tips.
 
 ---
 
@@ -60,9 +57,9 @@ If you are new to this system, read in order:
 The fastest paths to recovery are documented in [`07-troubleshooting.md`](07-troubleshooting.md).
 The most common issues, in order of frequency:
 
-1. **Website is down** → `cd /srv/intranet && docker compose up -d`
-2. **Can't connect via RDP** → `sudo systemctl restart gnome-remote-desktop`
+1. **Website is down** → `docker compose up -d`
+2. **Backend can't reach database** → check `sudo systemctl status postgresql`
 3. **Disk full** → see "Disk fills up" in troubleshooting
-4. **Lost the admin password** → see "Password reset" in troubleshooting
+4. **TLS certificate near expiry** → coordinate with hospital PKI team
 
 Bookmark this page.

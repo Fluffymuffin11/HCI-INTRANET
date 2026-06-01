@@ -1,25 +1,27 @@
 # 02 — Infrastructure
 
 This document describes the **server, operating system, network, and supporting
-services** that the intranet runs on. If you are responsible for keeping the
-server itself healthy, this is the foundational read.
+services** that host the intranet in the Huntsville Hospital production
+environment.
 
 ## Host inventory
 
 | Property | Value |
 |---|---|
 | Operating system | Red Hat Enterprise Linux 10.1 (Coughlan) |
-| Kernel | `6.12.0-124.8.1.el10_1.x86_64` |
-| Virtualization | KVM guest under Proxmox VE (Proxmox host: `<proxmox-hostname>`) |
-| VMID on Proxmox | 101 |
-| Hostname | `localhost` (transient — not formally set) |
-| Time zone | Set inside containers to `America/Chicago` |
+| Kernel | `6.12.x-el10` (current at install) |
+| Virtualization | VMware vSphere / ESXi guest |
+| vSphere cluster | Huntsville Hospital production cluster |
+| VM name | `Intranet-HCI` |
+| FQDN | `Intranet-HCI.heart.local` |
+| Time zone | `America/Chicago` (host and containers) |
 | vCPU | 4 |
-| vRAM | 7 GiB total · approx 3.7 GiB used · 3.2 GiB available |
-| vDisk | 28 GiB single LVM volume `/dev/mapper/rhel-root` · 40 % used |
-| Subscription | Red Hat Enterprise Linux subscription is **registered** |
+| vRAM | 8 GiB |
+| vDisk | 80 GiB single LVM volume `/dev/mapper/rhel-root` |
+| Subscription | Red Hat Enterprise Linux subscription, registered to hospital account |
+| Joined to | Huntsville Hospital corporate DNS; static A record managed by hospital IT |
 
-💡 To check current numbers at any time:
+To check current numbers at any time:
 ```bash
 $ hostnamectl              # OS and machine identity
 $ free -h                  # memory
@@ -30,88 +32,77 @@ $ uptime                   # how long up, load average
 ## Disk layout
 
 ```
-   /dev/mapper/rhel-root  ◄── single LVM logical volume
-       │
-       └─ mounted at /
-              │
-              ├─ /home/bryant/             ← admin user's home directory
-              │     └─ .claude/            ← Claude Code state (sessions, settings)
-              │
-              ├─ /srv/intranet/            ← APPLICATION (this project)
-              │     ├─ app/                ← Node backend source + node_modules
-              │     ├─ frontend/           ← React source + built dist/
-              │     ├─ nginx/              ← reverse-proxy config
-              │     ├─ public/             ← admin/ and manager/ static portals
-              │     ├─ data/               ← SQLite databases (live)
-              │     ├─ uploads/            ← uploaded files (live)
-              │     ├─ docs/               ← this documentation
-              │     └─ intranet-backup.tar.gz ← 48 MB snapshot
-              │
-              ├─ /var/lib/docker/          ← Docker images and overlay storage
-              ├─ /var/log/                 ← System logs (journald + legacy)
-              └─ /etc/                     ← System configuration
+   /dev/mapper/rhel-root  <-- single LVM logical volume
+       |
+       +- mounted at /
+              |
+              +- /home/<ops-user>/          (admin user's home directory)
+              |
+              +- /srv/intranet/             (APPLICATION - this project)
+              |     +- app/                 (Node backend source + node_modules)
+              |     +- frontend/            (React source + built dist/)
+              |     +- nginx/               (reverse-proxy config + TLS certs)
+              |     +- public/              (admin/ and manager/ static portals)
+              |     +- uploads/             (uploaded files - live)
+              |     +- prisma/              (schema.prisma, migrations)
+              |     +- docs/                (this documentation)
+              |
+              +- /var/lib/docker/           (Docker images and overlay storage)
+              +- /var/lib/pgsql/data/       (PostgreSQL 16 database files)
+              +- /var/log/                  (System logs - journald)
+              +- /etc/                      (System configuration)
 ```
 
-⚠️ **Everything important fits on one volume.** There is no separate `/var`
-partition. If the root filesystem fills up, the system stops working. See
-[`06-maintenance.md`](06-maintenance.md) → *Disk space checks* for monitoring.
+PostgreSQL stores its data in `/var/lib/pgsql/data` on the host. The application
+code, uploaded files, and the database all live on this single VM but the
+database runs as a native systemd service, not inside a Docker container, so
+DBAs can connect to it directly from their workstations.
 
 ## Network topology
 
-The VM has **three logical network presences**:
+The VM has **two logical network interfaces** in production:
 
 ```
-   ┌─────────────────────────────────────────────────────────┐
-   │                  RHEL 10 VM                             │
-   │                                                         │
-   │  lo            127.0.0.1/8        ◄── localhost only    │
-   │                                                         │
-   │  ens18         <LAN_IP>/24   ◄── practice LAN      │
-   │                IPv6:  <LAN_IPV6>          │
-   │                                                         │
-   │  tailscale0    <TAILSCALE_IP>/32  ◄── Tailscale overlay │
-   │                Hostname on tailnet: <vm-hostname>         │
-   │                Tailnet owner: <tailnet-owner-email>      │
-   │                                                         │
-   │  br-a5cc...    172.18.0.1/16      ◄── Docker bridge     │
-   │                (container-to-container only)            │
-   └─────────────────────────────────────────────────────────┘
+   +---------------------------------------------------------+
+   |                  RHEL 10 VM                             |
+   |                                                         |
+   |  lo            127.0.0.1/8        <-- localhost only    |
+   |                                                         |
+   |  ens192        <vsphere-assigned-ip>/24                 |
+   |                Huntsville Hospital corporate VLAN       |
+   |                DNS: Intranet-HCI.heart.local            |
+   |                                                         |
+   |  docker0       172.18.0.1/16      <-- Docker bridge     |
+   |                (container-to-container only)            |
+   +---------------------------------------------------------+
 ```
 
 | Interface | Purpose | Reachable from |
 |---|---|---|
 | `lo` | Loopback | the VM itself |
-| `ens18` | Primary NIC, bridged onto the practice LAN | Anything on `<LAN_SUBNET>` |
-| `tailscale0` | Encrypted overlay for remote admin access | Authorized devices on the `<tailnet-owner>@` tailnet |
-| `br-…` (docker0-style) | Inter-container traffic | Containers only |
+| `ens192` | Primary NIC on the corporate VLAN | Hospital workstations, IT-Ops jump host, DBA workstations |
+| `docker0` | Inter-container traffic | Containers only |
 
-### Tailscale peer list (current)
+There is **no Tailscale or other overlay network in production.** All access
+is over the hospital's internal corporate network only. The system is not
+exposed to the public internet.
 
-| Tailscale IP | Name | OS | State |
-|---|---|---|---|
-| `<TAILSCALE_IP>` | `<vm-hostname>` (this VM) | linux | online |
-| `<PROXMOX_TAILSCALE_IP>` | `<proxmox-hostname>` (Proxmox hypervisor) | linux | online |
-| `<TAILSCALE_PEER_1>` | `<peer-1>` | windows | offline |
-| `<TAILSCALE_PEER_2>` | `<peer-2>` | windows | offline |
-| `<TAILSCALE_PEER_3>` | `<peer-3>` | windows | offline |
+## Firewall (firewalld)
 
-Tailscale is administered by the account `<tailnet-owner-email>`. To onboard a new
-admin device, that account adds the device to the tailnet via the Tailscale admin
-console at <https://login.tailscale.com>.
-
-## Firewall
-
-`firewalld` is active using the default `public` zone, bound to `ens18`. Open
-ingress ports:
+`firewalld` is active using the default `public` zone, bound to `ens192`.
+Open ingress ports in production:
 
 | Port | Protocol | Service | Allowed from |
 |---|---|---|---|
-| `22/tcp` | TCP | OpenSSH | LAN + Tailscale |
-| `8080/tcp` | TCP | Intranet web (nginx) | LAN + Tailscale |
-| `3389/tcp` | TCP | RDP (gnome-remote-desktop) | LAN + Tailscale |
-| `9090/tcp` | TCP | Cockpit web console | LAN + Tailscale |
-| `546/udp` | UDP | DHCPv6 client | LAN |
-| `icmp` | — | ping / discovery | LAN |
+| `22/tcp` | TCP | OpenSSH | IT-Ops jump host (source-restricted) |
+| `443/tcp` | TCP | nginx (HTTPS) | Entire corporate VLAN |
+| `9090/tcp` | TCP | Cockpit web console | IT-Ops jump host (source-restricted) |
+| `5432/tcp` | TCP | PostgreSQL | DBA group on corporate VLAN (source-restricted) |
+| `icmp` | — | ping / discovery | Corporate VLAN |
+
+Note: port `80/tcp` is **not** open. nginx redirects clients to `:443`
+internally via a same-host listener that responds only on the loopback,
+not via firewalld passthrough.
 
 To inspect or modify:
 ```bash
@@ -120,17 +111,31 @@ $ sudo firewall-cmd --permanent --add-port=N/tcp      # open a port persistently
 $ sudo firewall-cmd --reload                          # apply changes
 ```
 
+## TLS / certificates
+
+The site is served over HTTPS using a certificate issued by the hospital's
+internal Certificate Authority. Trust is pre-installed on hospital
+workstations, so end users see a normal padlock with no warnings.
+
+| Item | Path / value |
+|---|---|
+| Certificate | `/etc/nginx/tls/intranet-hci.crt` |
+| Private key | `/etc/nginx/tls/intranet-hci.key` (mode 0600, owner root) |
+| Issued by | Huntsville Hospital Internal CA |
+| Renewal | Annual; coordinate with hospital PKI team 30 days before expiry |
+| Renewal procedure | See [`06-maintenance.md`](06-maintenance.md) -> *Certificate rotation* |
+
 ## Services running on the host
 
 ```
-   systemd ─┬─ docker.service              ◄── runs the intranet containers
-            ├─ firewalld.service           ◄── packet filtering
-            ├─ gdm.service                 ◄── GNOME display manager
-            ├─ gnome-remote-desktop.service ◄── RDP server (headless mode)
-            ├─ sshd.service                ◄── SSH access
-            ├─ tailscaled.service          ◄── Tailscale agent
-            ├─ rhsm.service / rhsmcertd    ◄── Red Hat subscription
-            └─ cockpit.socket              ◄── on-demand Cockpit (port 9090)
+   systemd --+-- postgresql.service         <-- PostgreSQL 16 database
+            +-- docker.service              <-- runs the intranet containers
+            +-- firewalld.service           <-- packet filtering
+            +-- sshd.service                <-- SSH access (jump host only)
+            +-- cockpit.socket              <-- on-demand Cockpit (port 9090)
+            +-- chronyd.service             <-- NTP sync to hospital NTP
+            +-- rsyslog.service             <-- ships logs to hospital SIEM
+            +-- rhsm.service / rhsmcertd    <-- Red Hat subscription
 ```
 
 To list all running services:
@@ -138,17 +143,14 @@ To list all running services:
 $ systemctl list-units --type=service --state=running
 ```
 
-## Listening sockets (current state)
+## Listening sockets (production state)
 
 ```
-   PORT    BIND ADDRESS                  SERVICE
-   22      0.0.0.0  +  [::]              sshd
-   631     127.0.0.1  +  [::1]           CUPS (printing — local only)
-   3389    *                              gnome-remote-desktop (RDP)
-   8080    0.0.0.0  +  [::]              nginx (intranet web)
-   9090    *                              cockpit
-   44237   <TAILSCALE_IP> (dynamic)      tailscaled
-   53784   [Tailscale IPv6] (dynamic)    tailscaled
+   PORT    BIND ADDRESS         SERVICE
+   22      0.0.0.0  +  [::]     sshd (firewall-restricted to jump host)
+   443     0.0.0.0  +  [::]     nginx (HTTPS, served by container)
+   5432    0.0.0.0  +  [::]     postgresql (firewall-restricted to DBA group)
+   9090    *                    cockpit (firewall-restricted)
 ```
 
 To check anytime:
@@ -161,17 +163,17 @@ $ sudo ss -tlnp
 When the VM powers on, this is roughly the sequence:
 
 ```
-   BIOS  →  GRUB  →  kernel  →  systemd  ─┬─►  network.target
-                                          ├─►  firewalld
-                                          ├─►  tailscaled        (joins tailnet)
-                                          ├─►  sshd              (accepts SSH)
-                                          ├─►  docker            (starts containers
-                                          │                       via Compose unit-style
-                                          │                       restart policy)
-                                          ├─►  graphical.target
-                                          │     └─►  gdm         (login screen on tty1)
-                                          └─►  gnome-remote-desktop
-                                                                 (RDP ready on :3389)
+   BIOS  ->  GRUB  ->  kernel  ->  systemd  --+-->  network.target
+                                              +-->  firewalld
+                                              +-->  chronyd
+                                              +-->  sshd
+                                              +-->  rsyslog
+                                              +-->  postgresql  (database ready
+                                              |                  before docker)
+                                              +-->  docker  (starts containers
+                                              |              via Compose unit-style
+                                              |              restart policy)
+                                              +-->  cockpit.socket
 ```
 
 Containers auto-start because they have `restart: unless-stopped` in
@@ -183,36 +185,53 @@ Cockpit is a Red Hat web console that lets you do most maintenance through a
 browser instead of SSH. Access it at:
 
 ```
-   https://<LAN_IP>:9090/
+   https://Intranet-HCI.heart.local:9090/
 ```
 
-Sign in with the same Linux user/password (`bryant` / your password). It will
-warn about a self-signed certificate — accept and proceed. From Cockpit you can:
+Cockpit uses the same TLS certificate as the main site. Log in with a
+hospital-domain-joined account that is a member of the `wheel` (sudo)
+group on the VM. From Cockpit you can:
 
-- Watch CPU/memory/disk graphs
-- Read system logs
-- Update software packages (`dnf` operations with a UI)
+- Watch CPU / memory / disk / network graphs
+- Read system logs (journald with search and filter)
+- Update software packages with a UI
 - Restart services
-- Open a terminal (same as SSH)
+- Open a terminal in the browser
 
-💡 Cockpit is the **easiest path** for someone unfamiliar with the command line.
+Cockpit is the **easiest path** for someone unfamiliar with the command line.
 
 ## Updates and subscription
 
 The VM is registered with Red Hat. To check status and apply updates:
 ```bash
-$ sudo subscription-manager status                    # is it registered?
-$ sudo dnf check-update                               # list pending updates
-$ sudo dnf upgrade                                    # apply them
+$ sudo subscription-manager status                    # confirm registration
+$ sudo dnf check-update                               # list available updates
+$ sudo dnf upgrade                                    # apply (asks y/n)
+$ sudo dnf upgrade -y                                 # apply without prompt
 ```
 
-⚠️ **Do not run `dnf upgrade` blindly during business hours.** Kernel updates
-require a reboot to take effect. Schedule updates during a maintenance window
-and reboot after with `sudo systemctl reboot`. See [`06-maintenance.md`](06-maintenance.md)
-→ *Updating the OS*.
+After installing updates, **check if a reboot is needed**:
+```bash
+$ sudo dnf needs-restarting -r                        # exit 1 means reboot recommended
+```
+
+If a reboot is needed (kernel, glibc, systemd updates), schedule it through
+the hospital change-management process. The Cockpit "Software Updates" page
+provides a friendlier UI for the same operations and flags reboot requirements.
+
+### Recommended update cadence
+
+| Cadence | Action |
+|---|---|
+| **Weekly** | `sudo dnf check-update` - read the list, decide what to apply |
+| **Monthly** | `sudo dnf upgrade --security` - security-only updates |
+| **Quarterly** | Full `sudo dnf upgrade` + reboot, during a maintenance window approved through change management |
+
+Never run `dnf upgrade` mid-workday. Some packages restart services mid-update;
+the intranet may briefly stop responding.
 
 ## Where to go next
 
-- [`03-application.md`](03-application.md) — the intranet code itself
-- [`04-deployment.md`](04-deployment.md) — Docker Compose mechanics
-- [`05-remote-access.md`](05-remote-access.md) — SSH, RDP, Tailscale, Cockpit
+- [`03-application.md`](03-application.md) - the intranet code itself
+- [`04-deployment.md`](04-deployment.md) - Docker Compose and the external database
+- [`05-remote-access.md`](05-remote-access.md) - SSH, Cockpit, DBA workstation access
