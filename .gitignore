@@ -17,6 +17,10 @@ frontend/.vite/
 data/
 uploads/
 
+# Migration data bundle — contains DB dumps + role password hashes, never commit
+migrate/dump/
+*.tgz
+
 # Backups and archives
 *.tar.gz
 *.zip
