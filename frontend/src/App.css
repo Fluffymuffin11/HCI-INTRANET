@@ -359,9 +359,9 @@ a {
 
 .announcement-photo {
   width: 100%;
-  max-height: 320px;
-  object-fit: cover;
+  height: auto;
   border-radius: 12px;
+  display: block;
 }
 
 .quick-link-list {
