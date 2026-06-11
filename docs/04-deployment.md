@@ -243,6 +243,7 @@ volumes:
 
 # Backend changes
 backend:
+  image: node:22-alpine                       # bump from node:20-alpine
   extra_hosts:
     - "host.docker.internal:host-gateway"   # NEW — lets backend reach host
   environment:
@@ -253,12 +254,22 @@ backend:
 
 ### One-time PostgreSQL setup on the production VM
 
+PostgreSQL 17 is not in the default RHEL 10 AppStream (which ships PG 16).
+Install from the official PostgreSQL repository:
+
 ```bash
-$ sudo dnf install -y postgresql-server postgresql-contrib
-$ sudo /usr/bin/postgresql-setup --initdb
-$ sudo systemctl enable --now postgresql
-# Configure listen_addresses and pg_hba.conf, then:
-$ sudo systemctl reload postgresql
+# 1. Add the official PostgreSQL repo
+$ sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-10-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+
+# 2. Disable the built-in postgresql AppStream module (avoids version conflict)
+$ sudo dnf -qy module disable postgresql
+
+# 3. Install PostgreSQL 17
+$ sudo dnf install -y postgresql17-server postgresql17-contrib
+$ sudo /usr/pgsql-17/bin/postgresql-17-setup initdb
+$ sudo systemctl enable --now postgresql-17
+# Configure listen_addresses and pg_hba.conf in /var/lib/pgsql/17/data/, then:
+$ sudo systemctl reload postgresql-17
 $ sudo -u postgres psql <<'SQL'
 CREATE USER intranet_app WITH PASSWORD '...';
 CREATE USER intranet_ro  WITH PASSWORD '...';

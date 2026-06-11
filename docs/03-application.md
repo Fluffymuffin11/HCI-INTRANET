@@ -308,7 +308,7 @@ Planned changes:
 
 | Today (Express) | Target (Fastify) |
 |---|---|
-| `express` | `fastify` |
+| `express` ^4.19 | `fastify` ^5 |
 | `express-session` + `connect-sqlite3` | `@fastify/session` + `@fastify/cookie` |
 | `multer` (multipart uploads) | `@fastify/multipart` |
 | `express-rate-limit` | `@fastify/rate-limit` |

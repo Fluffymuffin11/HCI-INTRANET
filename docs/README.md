@@ -38,7 +38,7 @@ Read in order:
 | **TLS** | Plain HTTP (LAN only) | HTTPS with hospital internal CA cert |
 | **Web port** | `8080/tcp` | `443/tcp` |
 | **Backend framework** | Express 4 | Fastify |
-| **Database** | SQLite (`/srv/intranet/data/intranet.db`) | PostgreSQL 16 (native systemd service on host) |
+| **Database** | SQLite (`/srv/intranet/data/intranet.db`) | PostgreSQL 17 (native systemd service on host) |
 | **ORM / DB driver** | `better-sqlite3` (raw SQL) | Prisma Client + Prisma migrations |
 | **Session store** | `connect-sqlite3` (SQLite-backed) | `@fastify/session` (PostgreSQL-backed) |
 | **Remote access** | Tailscale overlay + LAN | Corporate network only (no Tailscale) |

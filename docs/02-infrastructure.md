@@ -201,7 +201,7 @@ significantly:
 | TLS | (none) | Hospital internal CA cert |
 | Remote GUI | RDP via gnome-remote-desktop | (removed — Cockpit only) |
 | Tailscale | Active | Not installed |
-| New service | (none) | PostgreSQL 16 systemd service |
+| New service | (none) | PostgreSQL 17 systemd service |
 
 The Huntsville Hospital network team will assign the static IP and DNS name.
 Hospital PKI will issue the TLS certificate. Hospital security may require

@@ -124,8 +124,8 @@ specific implementations of each layer change.
 | Web entrypoint | `http://<ip>:8080` | `https://Intranet-HCI.heart.local` |
 | TLS | None (plain HTTP) | Internal-CA-issued cert in nginx, port 443 |
 | Backend framework | Express 4 (`server.js`) | Fastify (modular `src/`) |
-| Backend dependencies | `express`, `express-session`, `better-sqlite3` | `fastify`, `@fastify/session`, `@prisma/client` |
-| Database | SQLite (file in `data/`) | PostgreSQL 16 (native systemd service on host) |
+| Backend dependencies | `express`, `express-session`, `better-sqlite3` | `fastify ^5`, `@fastify/session`, `@prisma/client` |
+| Database | SQLite (file in `data/`) | PostgreSQL 17 (native systemd service on host) |
 | Schema management | Inline `db.exec()` in `server.js` | Prisma migrations under `prisma/migrations/` |
 | Session store | SQLite via `connect-sqlite3` | PostgreSQL via `@fastify/session` |
 | DBA query path | `docker exec` + `sqlite3` | `psql` / DBeaver / pgAdmin to host:5432 |
