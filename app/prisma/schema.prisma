@@ -1,0 +1,278 @@
+// Heart Center Intranet — Prisma schema
+//
+// Generated from the SQLite CREATE TABLE statements in server.js plus the
+// ALTER TABLE migrations applied during the homelab era.
+//
+// Conventions:
+//   - PascalCase model names map to snake_case table names via @@map.
+//   - camelCase Prisma fields map to snake_case columns via @map so the
+//     SQLite -> Postgres data migration is a straight INSERT ... SELECT.
+//   - SQLite 0/1 ints become Boolean in Postgres (Postgres native bool).
+//   - Foreign keys that existed only by convention in SQLite become real
+//     FKs in Postgres.
+//
+// To apply:
+//   npx prisma migrate dev --name init
+//   (later, in production: npx prisma migrate deploy)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────────────────────────────────────────────
+//   USERS  ·  AUTH
+// ───────────────────────────────────────────────────────────────────
+
+model User {
+  id           Int      @id @default(autoincrement())
+  username     String   @unique
+  passwordHash String   @map("password_hash")
+  role         String   @default("employee")
+  department   String?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  // Reverse relations (populated by other tables)
+  postsAuthored     Post[]      @relation("PostAuthor")
+  postsReviewed     Post[]      @relation("PostReviewer")
+  resourcesUploaded Resource[]
+  schedulesUploaded Schedule[]
+  spotlightUpdates  Spotlight[]
+  auditEntries      AuditLog[]
+  signupSheetsCreated SignupSheet[]
+
+  @@map("users")
+}
+
+// ───────────────────────────────────────────────────────────────────
+//   POSTS (announcements with moderation workflow)
+// ───────────────────────────────────────────────────────────────────
+
+model Post {
+  id            Int       @id @default(autoincrement())
+  title         String
+  content       String
+  photoFilename String?   @map("photo_filename")
+  videoUrl      String?   @map("video_url")
+  authorId      Int?      @map("author_id")
+  status        String    @default("pending") // 'pending' | 'approved' | 'rejected'
+  reviewedBy    Int?      @map("reviewed_by")
+  reviewedAt    DateTime? @map("reviewed_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  author   User? @relation("PostAuthor", fields: [authorId], references: [id])
+  reviewer User? @relation("PostReviewer", fields: [reviewedBy], references: [id])
+
+  @@index([status])
+  @@map("posts")
+}
+
+// ───────────────────────────────────────────────────────────────────
+//   RESOURCES (HR / Policy / etc. file listings)
+// ───────────────────────────────────────────────────────────────────
+
+model Resource {
+  id           Int      @id @default(autoincrement())
+  title        String
+  category     String
+  filename     String
+  originalName String   @map("original_name")
+  videoUrl     String?  @map("video_url")
+  uploadedBy   Int?     @map("uploaded_by")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  uploader User? @relation(fields: [uploadedBy], references: [id])
+
+  @@index([category])
+  @@map("resources")
+}
+
+// ───────────────────────────────────────────────────────────────────
+//   SCHEDULES (department schedules)
+// ───────────────────────────────────────────────────────────────────
+
+model Schedule {
+  id           Int      @id @default(autoincrement())
+  title        String
+  department   String
+  weekOf       String?  @map("week_of")
+  filename     String
+  originalName String   @map("original_name")
+  uploadedBy   Int?     @map("uploaded_by")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  uploader User? @relation(fields: [uploadedBy], references: [id])
+
+  @@index([department])
+  @@map("schedules")
+}
+
+// ───────────────────────────────────────────────────────────────────
+//   SPOTLIGHT (Employee Spotlight history)
+// ───────────────────────────────────────────────────────────────────
+
+model Spotlight {
+  id            Int      @id @default(autoincrement())
+  name          String
+  title         String
+  message       String
+  photoFilename String?  @map("photo_filename")
+  updatedBy     Int?     @map("updated_by")
+  updatedAt     DateTime @default(now()) @map("updated_at")
+
+  updater User? @relation(fields: [updatedBy], references: [id])
+
+  @@map("spotlight")
+}
+
+// ───────────────────────────────────────────────────────────────────
+//   SPOTLIGHT NOMINATIONS (incoming nominations awaiting review)
+// ───────────────────────────────────────────────────────────────────
+
+model SpotlightNomination {
+  id                Int      @id @default(autoincrement())
+  nomineeName       String   @map("nominee_name")
+  nomineeTitle      String?  @map("nominee_title")
+  nomineeDepartment String?  @map("nominee_department")
+  reason            String
+  submittedBy       String?  @map("submitted_by")
+  status            String   @default("pending")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([status])
+  @@map("spotlight_nominations")
+}
+
+// ───────────────────────────────────────────────────────────────────
+//   DIRECTORY (employee directory entries)
+// ───────────────────────────────────────────────────────────────────
+
+model Directory {
+  id         Int      @id @default(autoincrement())
+  name       String
+  title      String?
+  department String?
+  phone      String?
+  email      String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@map("directory")
+}
+
+// ───────────────────────────────────────────────────────────────────
+//   AUDIT LOG (super-admin actions for traceability)
+// ───────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  userId    Int?     @map("user_id")
+  username  String?
+  action    String
+  detail    String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([createdAt])
+  @@map("audit_log")
+}
+
+// ───────────────────────────────────────────────────────────────────
+//   SITE SETTINGS (site-wide key/value configuration)
+// ───────────────────────────────────────────────────────────────────
+
+model SiteSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@map("site_settings")
+}
+
+// ───────────────────────────────────────────────────────────────────
+//   SIGNUP SHEETS (events open for signup)
+// ───────────────────────────────────────────────────────────────────
+
+model SignupSheet {
+  id                 Int      @id @default(autoincrement())
+  title              String
+  description        String?
+  eventType          String   @default("single") @map("event_type") // 'single' | 'recurring'
+  eventDate          String?  @map("event_date")
+  endDate            String?  @map("end_date")
+  recurrencePattern  String?  @map("recurrence_pattern")
+  recurrenceDays     String?  @map("recurrence_days")
+  recurrenceEndDate  String?  @map("recurrence_end_date")
+  deadline           String?
+  location           String?
+  maxSlots           Int      @default(0) @map("max_slots")
+  allowWaitlist      Boolean  @default(false) @map("allow_waitlist")
+  isOpen             Boolean  @default(true)  @map("is_open")
+  createdBy          Int?     @map("created_by")
+  createdByName      String?  @map("created_by_name")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  creator User?           @relation(fields: [createdBy], references: [id])
+  entries SignupEntry[]
+
+  @@index([isOpen])
+  @@map("signup_sheets")
+}
+
+model SignupEntry {
+  id          Int      @id @default(autoincrement())
+  sheetId     Int      @map("sheet_id")
+  name        String
+  department  String?
+  notes       String?
+  isWaitlist  Boolean  @default(false) @map("is_waitlist")
+  signedUpAt  DateTime @default(now()) @map("signed_up_at")
+
+  sheet SignupSheet @relation(fields: [sheetId], references: [id], onDelete: Cascade)
+
+  @@index([sheetId])
+  @@map("signup_entries")
+}
+
+// ───────────────────────────────────────────────────────────────────
+//   IT TICKETS
+// ───────────────────────────────────────────────────────────────────
+
+model ItTicket {
+  id              Int      @id @default(autoincrement())
+  ticketType      String   @map("ticket_type") // 'incident' | 'request' | …
+  name            String
+  department      String?
+  phone           String?
+  subject         String
+  description     String
+  priority        String   @default("normal") // 'low' | 'normal' | 'high' | 'urgent'
+  equipmentType   String?  @map("equipment_type")
+  equipmentDetail String?  @map("equipment_detail")
+  status          String   @default("open") // 'open' | 'in_progress' | 'resolved' | 'closed'
+  assignedTo      String?  @map("assigned_to")
+  resolution      String?
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([priority])
+  @@map("it_tickets")
+}
+
+// ───────────────────────────────────────────────────────────────────
+//   SESSION (used by @fastify/session Postgres store in the Fastify rewrite)
+// ───────────────────────────────────────────────────────────────────
+
+model Session {
+  sid       String   @id
+  data      String
+  expiresAt DateTime @map("expires_at")
+
+  @@index([expiresAt])
+  @@map("session")
+}

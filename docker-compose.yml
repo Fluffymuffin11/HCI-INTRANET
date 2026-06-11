@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   web:
     image: nginx:1.30-alpine
@@ -16,16 +14,34 @@ services:
     restart: unless-stopped
 
   backend:
-    image: node:20-alpine
+    image: node:22-alpine
     container_name: intranet_backend
     working_dir: /app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - TZ=America/Chicago
       - NODE_ENV=production
       - SESSION_SECRET=${SESSION_SECRET}
+      - DATABASE_URL=${DATABASE_URL}
+      - INITIAL_ADMIN_PASSWORD=${INITIAL_ADMIN_PASSWORD}
     volumes:
       - ./app:/app
-      - ./data:/data
       - ./uploads:/uploads
     command: sh -c "npm install && npm start"
+    restart: unless-stopped
+
+  prisma-studio:
+    image: node:22-alpine
+    container_name: intranet_prisma_studio
+    working_dir: /app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+    volumes:
+      - ./app:/app
+    ports:
+      - "5555:5555"
+    command: sh -c "npm install && npx prisma studio --port 5555 --browser none"
     restart: unless-stopped
